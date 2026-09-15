@@ -8,6 +8,11 @@ parsing, bounded history reader, directory lock and atomic writer. All aggregati
 is standard-library Python over already aggregated source values; no database,
 dependency, dbt model, scheduler or deployment mechanism is added.
 
+The uncommitted [partial-refresh contract](dashboard_partial_refresh.md) adds trade
+v2 nullable monthly inputs and coordinated source-error retention/status reporting.
+V1 remains readable; frozen rows/exports are not rewritten as part of feature
+implementation. Feature live acceptance and manual code promotion remain pending.
+
 ## Commands and revision policy
 
 Run from `pipeline/` with the existing Python 3.11 dashboard environment:
@@ -30,7 +35,8 @@ its referenced history partitions must be alongside it. Future as-of dates fail.
    at the preceding month of `--as-of`. History ending 9 September or 31 August
    allows August; history ending 30 August allows only July. An ahead-of-as-of
    history fails. Stale history can hold the trade cutoff back; it cannot cause a
-   partial month to be published. An existing later trade watermark fails rather
+   partial calendar month to be published. A covered month may contain explicit
+   null inputs under v2, with null totals. An existing later trade watermark fails rather
    than moving backwards. `--as-of` does not reproduce a historical source vintage.
 2. **Initial backfill:** must start in 2019, always uses DE–LU, and never includes
    a partial latest month. Fetch only selected missing years. Existing years are
@@ -157,12 +163,14 @@ Recovered source values (MWh, retaining source signs):
 | 2020-11 | 4706: 51,871 | 4708: −29,263 |
 | 2020-12 | 4718: 37,004 | 4720: −199,774 |
 
-Thus the generated snapshot has **no null months**. If the daily fallback is
+Thus the initial September 10 snapshot had **no null months**. If the daily fallback is
 unavailable (404) or lacks an active day, the named monthly input stays missing.
 That month must have all three totals `null` and the exact missing IDs. Malformed
-fallbacks and transport failures fail publication. No wider fallback search occurs.
-New missing series-months elsewhere fail with their month/ID list for investigation
-and explicit backfill; the allowlist is never expanded automatically.
+fallbacks and transport failures fail this component; the coordinator retains its
+original bytes as stale. No wider fallback search occurs. V1 keeps its historical
+missing-series allowlist; v2 accepts new explicit null monthly observations with
+their exact missing IDs and null totals. Omitted required months still fail source
+acquisition. See [trade v2](dashboard_partial_refresh.md#monthly-trade-v2).
 
 ### Optional official net cross-check and historical discrepancies
 
@@ -195,9 +203,11 @@ Of 68 months with non-null official net in this backfill, 64 agree within 0.01 M
 all 2025 and January–August 2026 values do. Routine refresh checks the three months
 being replaced against net, while validating syntax/signs across every full chunk.
 
-## Exact JSON contract: schema 1
+## Exact JSON contract: schemas 1 and 2
 
-The root has exactly these fields, with no creation timestamp:
+The root has exactly these fields, with no creation timestamp. The example is v1;
+v2 uses the same fields and permits newly reported missing gross series-months.
+The producer emits v2 only when new gaps require it or when retaining existing v2:
 
 ```text
 {
@@ -264,7 +274,8 @@ fetched concurrently, not as 23 serial round trips. It made no fallback requests
 - Shared bounded transient retry behavior: at most three attempts per URL, 1/2-second
   backoff for transient errors; 404 is not retried. Other permanent errors fail.
 - Refresh fetch deadline **15 seconds**, backfill **120 seconds**; socket timeout
-  at most 15 seconds, clipped to remaining deadline. Deadline exhaustion fails;
+  at most 15 seconds, clipped to remaining deadline. Deadline exhaustion fails the
+  component (retained as stale in a coordinated run);
   scheduling/socket teardown can add small overhead, so this is not a guaranteed
   end-to-end SLA. Measured normal additional runtime is below the 10–15-second target.
 - Body limits: **64 KB/response**, **2 MB total**; export limit **250 KB**. No raw
@@ -291,8 +302,11 @@ visibly suppressed where a full annual total cannot be supported; current trade
 years are explicitly labelled as partial years. No negative-price-hour inference
 is made from monthly or daily averages.
 
-The daily/manual workflow refreshes recent hourly data, daily history, then monthly
-trade, in that order. Monthly describes the source resolution; this bounded trade
+The daily/manual workflow stages recent hourly data, independent daily history, then
+monthly trade through [`.refresh`](dashboard_partial_refresh.md#coordinated-cli-failure-boundary-and-recovery).
+Source failures retain the affected export and report embedded stale status; shared
+errors, including available net contradictions, abort the bundle. Monthly describes
+the source resolution; this bounded trade
 refresh participates in the daily run. Its review artifact includes the trade
 snapshot. Publishing requires the main event ref, then explicitly checks out release
 and guards `HEAD == origin/releases/cloudflare`, ignoring main's position. Released

@@ -4,6 +4,11 @@ Research date: 14 September 2026. **Backlog only:** the current runtime is accep
 for now. This document does not authorize schedule changes, additional polling,
 new infrastructure, relaxed validation, or production publication.
 
+The later [partial-refresh feature](dashboard_partial_refresh.md) supersedes the
+old common-cutoff behavior described in the historical baseline below. It keeps
+the actual `0 6 * * *` schedule (06:00 UTC); the runtime/optimization backlog in
+this document remains deferred. This baseline is not live acceptance of that feature.
+
 ## Measured baseline
 
 [Release-first manual run 34879363165](https://github.com/Graflinger/databearer/actions/runs/34879363165)
@@ -62,7 +67,7 @@ creation time with the instant a complete dataset first became available.
 
 ### Our completeness policy matters more than a nominal source clock
 
-The recent pipeline in
+The pre-partial-refresh recent pipeline measured here, in
 `pipeline/src/data_pipelines/dashboards/german_electricity/pipeline.py`:
 
 - Uses the current **Europe/Berlin date** as `as_of`.
@@ -88,8 +93,8 @@ Those datasets should not drive an intraday schedule for recent hourly data.
 
 ### Scheduling recommendation (deferred)
 
-Keep the existing **09:17 UTC daily** schedule for now. It is active, but GitHub's
-scheduled start is best-effort, not a guaranteed 09:17 execution. Distinguish:
+Keep the actual **06:00 UTC daily** schedule (`0 6 * * *`) unchanged. GitHub's
+scheduled start is best-effort, not a guaranteed 06:00 execution. Distinguish:
 
 1. **Upstream completeness lag** until all required source series are ready.
 2. **Sampling/scheduler delay** between readiness and our next actual fetch.

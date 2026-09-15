@@ -11,12 +11,7 @@ const snapshot = require('../src/_data/germanElectricity.json');
 const template = fs.readFileSync(path.join(__dirname, '../src/dashboards/strom.njk'), 'utf8').replace(/^---[\s\S]*?---\n/, '');
 const controller = fs.readFileSync(path.join(__dirname, '../src/js/dashboards/electricity-dashboard.js'), 'utf8');
 const env = new nunjucks.Environment(null, { autoescape: true });
-env.addFilter('electricitySummary', (input) => {
-  const summary = data.summarize(input);
-  return { ...summary, text: data.presentation(summary), stale: false,
-    createdLabel: data.timestampLabel(Date.parse(input.snapshot_created_at)) };
-});
-env.addFilter('electricityNumber', data.number);
+require('../src/data_ingestion/builders/electricityFilters').register(env);
 const realPartition = (year) => {
   const entry = realHistoryData.manifest.years.find((item) => item.year === year);
   return JSON.parse(fs.readFileSync(path.join(__dirname, '../src/data-history/german-electricity', path.basename(entry.url))));
@@ -65,7 +60,7 @@ async function start() { window.eval(controller); await flush(); }
 
 test('static YTD is complete and readable without JavaScript, and embeds only the validated manifest', () => {
   expect(document.querySelector('[data-value="label"]').textContent).toBe(historyData.summary.label);
-  expect(document.querySelectorAll('tbody th[scope="row"]')).toHaveLength(12);
+  expect(document.querySelectorAll('.electricity-mix tbody th[scope="row"]')).toHaveLength(12);
   expect(document.querySelectorAll('#electricity-year option')).toHaveLength(previousEntries.length + 1);
   expect([...document.querySelectorAll('#electricity-year option')].slice(1).map((node) => node.value)).toEqual(previousEntries.map((item) => String(item.year)));
   expect(JSON.parse(document.getElementById('electricity-history-manifest').textContent)).toEqual(historyData.manifest);
@@ -77,9 +72,9 @@ test('static YTD is complete and readable without JavaScript, and embeds only th
 
 test('methodology distinguishes hourly data, daily history and missing values from zero', () => {
   const text = document.getElementById('electricity-dashboard').textContent;
-  expect(text).toContain('Der aktuelle Stundendatensatz umfasst 30 vollständige Kalendertage');
+  expect(text).toContain('Der aktuelle Stundendatensatz umfasst ein Raster von 30 abgeschlossenen Kalendertagen');
   expect(text).toContain('Die Jahresansichten nutzen die täglichen Energiesummen von SMARD');
-  expect(text).toContain('Diese Werte bleiben als fehlend gekennzeichnet und werden nicht durch 0 ersetzt');
+  expect(text).toContain('Quellenlücken bleiben unbekannt und werden nicht durch 0 ersetzt');
   expect(text).not.toContain('Diese Werte bleiben null');
   expect(text).toContain('DE–AT–LU');
   expect(text).toContain('23 oder 25 Stunden');
@@ -119,7 +114,7 @@ test('default YTD then all years keep KPI, table, legend, graph, units and price
     expect(chartOption(1).yAxis.name).toBe('GW');
     expect(chartOption(0).xAxis.data).toEqual(summary.rows.map((row) => row.date));
     expect(chartOption(0).series[0].data).toEqual(summary.rows.map((row) => history.complete(row) ? row.energy_gwh.biomass / row.hours : null));
-    expect(chartOption(1).series[0].data).toEqual(summary.rows.map((row) => row.energy_gwh.load / row.hours));
+    expect(chartOption(1).series[0].data).toEqual(summary.rows.map((row) => row.energy_gwh.load === null ? null : row.energy_gwh.load / row.hours));
     expect(chartOption(2).series[0].data.map((point) => point.value)).toEqual(summary.rows.map((row) => row.price_eur_mwh));
     expect(document.getElementById('electricity-history-download').getAttribute('href')).toBe(entry(year).url);
   }
@@ -129,7 +124,8 @@ test('default YTD then all years keep KPI, table, legend, graph, units and price
   expect(chartOption(0).series).toHaveLength(11);
   expect(document.getElementById('electricity-negative-label').textContent).toBe('Stunden mit negativem Stundenmittel');
   expect(document.getElementById('electricity-generation-heading').textContent).toBe('Erzeugung im Zeitraum');
-  expect(document.getElementById('electricity-history-coverage').hidden).toBe(true);
+  expect(document.getElementById('electricity-history-coverage').hidden).toBe(false);
+  expect(document.getElementById('electricity-history-coverage').textContent).toContain('Abdeckung');
   expect(document.getElementById('electricity-year').value).toBe('');
   document.getElementById('electricity-ytd').click();
   await flush();
@@ -253,7 +249,7 @@ test('history remains usable when hourly request or charts fail', async () => {
   expect(status()).toContain('Diagramme konnten nicht dargestellt');
   expect(document.querySelector('[data-value="label"]').textContent).toBe(history.summarize(partition(2015)).label);
   expect(document.querySelectorAll('[data-days]:disabled')).toHaveLength(3);
-  expect(document.querySelectorAll('tbody th')).toHaveLength(12);
+  expect(document.querySelectorAll('.electricity-mix tbody th')).toHaveLength(12);
   await jest.advanceTimersByTimeAsync(60000);
   expect(document.getElementById('electricity-recent-error').hidden).toBe(false);
   expect(document.getElementById('electricity-recent-error').textContent).toContain('nicht geladen oder validiert');

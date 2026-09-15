@@ -15,8 +15,7 @@ const annual = verifyAnnual(fs.readFileSync(path.join(__dirname, '../src/_data/g
 const cases = scenarios(readHistory(), producer, recent, annual);
 const template = fs.readFileSync(path.join(__dirname, '../src/dashboards/strom.njk'), 'utf8').replace(/^---[\s\S]*?---\n/, '');
 const env = new nunjucks.Environment(new nunjucks.FileSystemLoader(path.join(__dirname, '../src/_includes')), { autoescape: true });
-env.addFilter('electricityNumber', data.number);
-env.addFilter('electricitySummary', (input) => { const summary = data.summarize(input); return { ...summary, text: data.presentation(summary) }; });
+require('../src/data_ingestion/builders/electricityFilters').register(env);
 describe.each(cases)('$name', ({ historyData, snapshot, now, trends }) => {
 const monthlyCount = monthCount(snapshot.first_month, snapshot.last_month);
 const tableCounts = [monthlyCount];

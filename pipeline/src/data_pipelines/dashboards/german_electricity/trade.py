@@ -104,7 +104,7 @@ def parse_month(value):
 
 
 def source_number(value, series_id, month):
-    if type(value) not in (int, float) or not math.isfinite(value):
+    if type(value) not in (int, float) or (type(value) is float and not math.isfinite(value)):
         raise ValidationError(f"{month_key(month)}/{series_id}: expected finite number")
     hours = (midnight_ms(shift(month, 1)) - midnight_ms(month)) / HOUR_MS
     if abs(value) > 200_000 * hours:
@@ -244,7 +244,7 @@ def recover_startup_months(client, observations, metrics):
                 metrics.setdefault("unrecoverable_startup_series", []).append(f"{month_key(month)}/{i}")
 
 
-def make_rows(observations, start, end, metrics):
+def make_rows(observations, start, end, metrics, *, nullable=False):
     rows, unknown = [], []
     for month in months(start, end):
         values, missing, structural = {}, [], []
@@ -255,7 +255,7 @@ def make_rows(observations, start, end, metrics):
                 value = 0
             elif value is None:
                 missing.append(series_id)
-                if (month, series_id) not in KNOWN_GAPS:
+                if (month, series_id) not in KNOWN_GAPS and not (nullable and month in observations[month.year][series_id]):
                     unknown.append(f"{month_key(month)}/{series_id}")
             if value is not None:
                 source_number(value, series_id, month)
@@ -276,7 +276,8 @@ def make_rows(observations, start, end, metrics):
                 if delta > NET_TOLERANCE_MWH:
                     known = KNOWN_NET_DISCREPANCIES.get(month)
                     if known is None or abs(signed_delta - known) > NET_TOLERANCE_MWH:
-                        raise ValidationError(f"{month_key(month)}: official net mismatch {signed_delta:.8f} MWh; investigate")
+                        from .pipeline import ConsistencyError
+                        raise ConsistencyError(f"{month_key(month)}: official net mismatch {signed_delta:.8f} MWh; investigate")
                     metrics.setdefault("known_net_discrepancies_mwh", {})[month_key(month)] = round(signed_delta, 8)
         rows.append(row)
     if unknown:
@@ -289,10 +290,10 @@ def digest(value):
     return hashlib.sha256(canonical_bytes({k: v for k, v in value.items() if k != "content_hash"})).hexdigest()
 
 
-def snapshot(rows):
+def snapshot(rows, *, nullable=False):
     if not rows:
         raise ValidationError("No completed trade months")
-    value = {"schema_version": 1, "kind": "german-electricity-trade", "source": SOURCE,
+    value = {"schema_version": 2 if nullable else 1, "kind": "german-electricity-trade", "source": SOURCE,
              "region": "DE-LU", "timezone": "Europe/Berlin", "first_month": "2019-01",
              "last_month": rows[-1]["month"], "revision_policy": POLICY, "rows": rows}
     value["content_hash"] = digest(value)
@@ -305,7 +306,7 @@ def validate_snapshot(value):
             "last_month", "revision_policy", "rows", "content_hash"}
     if not isinstance(value, dict) or set(value) != keys:
         raise ValidationError("Invalid trade snapshot fields")
-    if (type(value["schema_version"]) is not int or value["schema_version"] != 1
+    if (type(value["schema_version"]) is not int or value["schema_version"] not in (1, 2)
             or value["kind"] != "german-electricity-trade" or value["source"] != SOURCE
             or value["region"] != "DE-LU" or value["timezone"] != "Europe/Berlin"
             or value["first_month"] != "2019-01" or value["revision_policy"] != POLICY):
@@ -328,7 +329,7 @@ def validate_snapshot(value):
             if (not isinstance(ids, list) or any(type(i) is not int or i not in GROSS for i in ids)
                     or ids != sorted(set(ids))):
                 raise ValidationError(f"Invalid {field}")
-        if any((month, i) not in KNOWN_GAPS for i in row["missing_series"]):
+        if value["schema_version"] == 1 and any((month, i) not in KNOWN_GAPS for i in row["missing_series"]):
             raise ValidationError("Unknown trade missing series")
         if any(month >= STARTS.get(i, FIRST) for i in row["structural_zero_series"]):
             raise ValidationError("Invalid structural zero")
@@ -410,7 +411,7 @@ def publish(value, output, expected_raw):
 
 
 def run(mode, as_of, output=OUTPUT, *, start_year=2019, end_year=None, reconcile=False,
-        history_manifest=HISTORY_MANIFEST, client=None):
+        history_manifest=HISTORY_MANIFEST, client=None, nullable=True):
     started = time.monotonic()
     client = client or TradeClient(refresh=mode == "refresh")
     output, history_manifest = Path(output), Path(history_manifest)
@@ -446,16 +447,29 @@ def run(mode, as_of, output=OUTPUT, *, start_year=2019, end_year=None, reconcile
                          if reconcile or year not in existing]
                 if not previous and start_year != 2019:
                     raise ValidationError("Initial trade backfill must start in 2019")
-            observations = fetch_monthly(client, years)
-            recover_startup_months(client, observations, metrics)
+            from .pipeline import ComponentUnavailable, ConsistencyError
+            try:
+                observations = fetch_monthly(client, years)
+                recover_startup_months(client, observations, metrics)
+            except ValidationError as exc:
+                raise ComponentUnavailable(str(exc)) from exc
             metrics["fetch_seconds"] = round(time.monotonic() - started, 3)
             fresh = []
             for year in years:
                 start = correction_start if mode == "refresh" else date(year, 1, 1)
                 end = min(date(year, 12, 1), cutoff)
-                fresh.extend(make_rows(observations, start, end, metrics))
+                try:
+                    fresh.extend(make_rows(observations, start, end, metrics, nullable=nullable))
+                except ConsistencyError:
+                    raise
+                except ValidationError as exc:
+                    raise ComponentUnavailable(str(exc)) from exc
                 retained = [row for row in retained if not start <= parse_month(row["month"]) <= end]
-            value = snapshot(sorted(retained + fresh, key=lambda row: row["month"]))
+            # Emit v2 only when required by new gaps or retaining an existing v2.
+            rows = sorted(retained + fresh, key=lambda row: row["month"])
+            use_v2 = (previous and previous["schema_version"] == 2) or any(
+                (parse_month(row["month"]), i) not in KNOWN_GAPS for row in rows for i in row["missing_series"])
+            value = snapshot(rows, nullable=bool(use_v2))
             if last and parse_month(value["last_month"]) < last:
                 raise ValidationError("Refusing to truncate trade coverage")
             if read_bounded(history_manifest, MANIFEST_LIMIT) != history_raw:

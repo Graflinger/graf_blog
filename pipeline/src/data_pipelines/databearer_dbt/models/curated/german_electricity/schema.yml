@@ -12,7 +12,7 @@ models:
       - name: timestamp_ms
         tests: [not_null]
       - name: value
-        tests: [not_null]
+        description: Nullable source observation; explicit null is unknown, numeric zero is observed zero.
   - name: german_electricity_hourly
     description: One row per actual UTC hour in 30 complete Europe/Berlin calendar days. See docs/german_electricity_data.md.
     columns:

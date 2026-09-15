@@ -10,8 +10,7 @@ const { mount } = require('../src/js/dashboards/electricity-progress');
 const recent = require('../src/_data/germanElectricity.json');
 const template = fs.readFileSync(path.join(__dirname, '../src/dashboards/strom.njk'), 'utf8').replace(/^---[\s\S]*?---\n/, '');
 const env = new nunjucks.Environment(new nunjucks.FileSystemLoader(path.join(__dirname, '../src/_includes')), { autoescape: true });
-env.addFilter('electricityNumber', data.number);
-env.addFilter('electricitySummary', (input) => { const summary = data.summarize(input); return { ...summary, text: data.presentation(summary) }; });
+require('../src/data_ingestion/builders/electricityFilters').register(env);
 
 describe.each([['baseline', fixture(), '2026-09-10'], ['rollover', rollover(), '2027-01-01']])('%s', (_, snapshot, day) => {
   const bytes = encode(snapshot);

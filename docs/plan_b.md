@@ -20,6 +20,11 @@ New rollout requires deliberate promotion to both branches and live verification
 the September 10 success covered the old both-ref design only. Independent data or
 asset publishing options below remain alternatives, not part of this implementation.
 
+The approved [partial-refresh contract](dashboard_partial_refresh.md) also retains
+validated recent values per component on source failure, using the existing tracked
+export as durable input. This adds no persistent database or infrastructure and does
+not activate the optional migrations below. Its manual rollout/live acceptance is pending.
+
 Add infrastructure only for a demonstrated need. **Keeping history does not require
 a server, and renting a server does not require making the website dynamic.** Keep
 Eleventy/ECharts and CDN-served exports unless a feature genuinely needs a live API.

@@ -128,11 +128,11 @@ test('official annual rows replace all twelve categories and the entire denomina
     expect(row.gas_share).toBe(Number((source.energy_gwh.gas / total * 100).toFixed(8)));
     expect(row.mix_twh).toEqual(Object.fromEntries(Object.entries(source.energy_gwh).map(([key, value]) => [key, Number((value / 1000).toFixed(8))])));
   }
-  expect(summary.energy.every((row) => Number.isFinite(row.generation_twh))).toBe(true);
+  expect(summary.energy.every((row) => Number.isFinite(row.generation_twh) || row.complete_days < row.days)).toBe(true);
   expect(summary.energy.filter((row) => row.method === 'daily_sum')).toEqual(dailyOnly.energy.filter((row) => ![2016, 2018].includes(row.year)));
   expect(summary.trade).toEqual(dailyOnly.trade);
   expect(JSON.stringify(historyData)).toBe(before);
-  expect(historyData.partitions.flatMap((partition) => partition.rows).flatMap((row) => Object.values(row.energy_gwh)).filter((value) => value === null)).toHaveLength(5);
+  expect(historyData.partitions.filter((partition) => partition.schema_version === 1).flatMap((partition) => partition.rows).flatMap((row) => Object.values(row.energy_gwh)).filter((value) => value === null)).toHaveLength(5);
   expect(fs.readFileSync(path.join(__dirname, '../src/_data/germanElectricityAnnual.json'))).toEqual(annualRaw);
 });
 
@@ -155,7 +155,8 @@ test('absent supplement file retains daily-only gaps; an unreadable file fails',
   try {
     const { summary } = readTrends();
     expect(summary.inputs.annual_content_hash).toBeNull();
-    expect(summary.energy.filter((row) => row.generation_twh === null).map((row) => row.year)).toEqual([2016, 2018]);
+    const expectedGaps = historyData.partitions.filter((partition) => partition.rows.at(-1).date.endsWith('-12-31') && partition.rows.some((row) => !history.complete(row))).map((partition) => partition.year);
+    expect(summary.energy.filter((row) => row.generation_twh === null).map((row) => row.year)).toEqual(expectedGaps);
     spy.mockImplementation((file, ...args) => {
       if (file.endsWith('germanElectricityAnnual.json')) throw Object.assign(new Error('unreadable'), { code: 'EACCES' });
       return lstat(file, ...args);
@@ -259,7 +260,8 @@ test.each(cases)('$name: coverage, chart labels and partial-year styling survive
   const months = Number(snapshot.last_month.slice(5));
   expect(summary.trade.years.at(-1)).toMatchObject({ label: annualLabel(snapshot.last_month), months, partial_year: months < 12 });
   const latestRows = snapshot.rows.filter((row) => row.month.slice(0, 4) === snapshot.last_month.slice(0, 4));
-  expect(summary.trade.years.at(-1).imports_twh).toBeCloseTo(latestRows.reduce((sum, row) => sum + row.imports_gwh, 0) / 1000, 8);
+  if (latestRows.some((row) => row.missing_series.length)) expect(summary.trade.years.at(-1).imports_twh).toBeNull();
+  else expect(summary.trade.years.at(-1).imports_twh).toBeCloseTo(latestRows.reduce((sum, row) => sum + row.imports_gwh, 0) / 1000, 8);
   const charts = options(summary, { ink: '#111', line: '#ddd', accent: '#c4ad61', muted: '#555', font: 'sans-serif' });
   expect(charts.shares.series).toHaveLength(3);
   expect(charts.shares.series.map((series) => series.lineStyle)).toEqual(Array(3).fill({ type: 'solid', width: 3 }));

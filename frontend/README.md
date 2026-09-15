@@ -8,7 +8,7 @@ Built with [Eleventy](https://www.11ty.dev/) and [Apache ECharts](https://echart
 
 ## Daily dashboard publication
 
-The authorized `dashboard-refresh.yml` runs daily at **09:17 UTC**; manual dispatch
+The authorized `dashboard-refresh.yml` runs daily at **06:00 UTC**; manual dispatch
 defaults to **`publish=false`**, refreshing/validating the selected ref only.
 Publishing requires the `main` **event ref**, then explicitly checks out
 `releases/cloudflare` for released scripts, runtime, and frontend. The guard requires
@@ -41,6 +41,13 @@ September 11/12 old guards stopped with main ahead. Those results do not verify 
 new design. A push is not a deployment guarantee. See the
 [publication runbook](../docs/dashboard_publication.md) and
 [frontend dashboard checks](README-dashboard.md); tests/lint/build use Node 20.
+
+The uncommitted [partial-refresh feature](../docs/dashboard_partial_refresh.md)
+supports recent/history/trade v2 nulls and explicit coverage/statuses, retaining
+validated last-good components on source errors. Shared errors abort the staged
+bundle. This is an approved durable recent-export exception with no persistent DB.
+Feature live acceptance/manual code promotion to both branches remains pending;
+implementation/PR permission does not authorize production or frozen-export rewrites.
 
 ## Electricity dashboard: Ausbau, Speicher & Netze
 

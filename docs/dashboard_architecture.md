@@ -17,8 +17,13 @@ current year's latest 35 complete days are corrected. Full reconstruction remain
 an explicit bounded backfill (182 daily-source requests for 2015–2026). This
 exception changes export-state retention and the total history-size budget; it
 does not persist DuckDB. Scheduling/publication is separately authorized by the
-publication policy linked above. The recent hourly snapshot retains the stateless
-design below; monthly trade also uses a bounded durable snapshot.
+publication policy linked above. Monthly trade also uses a bounded durable snapshot.
+The approved [partial-refresh extension](dashboard_partial_refresh.md) additionally
+uses validated recent exports as durable per-component last-good inputs. Explicit
+nulls, source failure retention and independent cutoffs follow that contract;
+shared validation failures still abort the staged bundle. Its uncommitted feature
+has not had live refresh/deployment acceptance; manual code promotion to both
+branches is required. Default stateless guidance below applies outside these exceptions.
 
 Start with **one dashboard, one daily refresh, and the existing Python/DuckDB/dbt →
 Eleventy/ECharts → Cloudflare Pages stack**. No rented server, persistent database,
@@ -57,11 +62,10 @@ Daily/manual GitHub Actions run
   → fetch only the required source data
   → fresh DuckDB: staging → selected cleaned/curated dbt models
   → validate and export deterministic chart data
-  → compare with the tracked dashboard snapshot
-      unchanged: no new commit/build; failed publication has a separate recovery path
-      changed: validate frontend → commit only allowlisted exports → push normally
-  → Cloudflare Pages builds and publishes a complete site deployment
-  → electricity: refresh current-year history with recent overlap checks, then monthly trade
+  → electricity .refresh: stage recent per-component refresh, independent history, then trade
+      source failures: retain validated last-good component with explicit status
+      shared errors/available contradictions: abort staged bundle
+  → validate available overlap and embedded status cutoffs; promote coherent local bundle
   → frontend tests/lint/build (including unchanged data in the current workflow)
   → compare with the tracked dashboard snapshot
       unchanged: no new commit or Git-triggered Cloudflare build
@@ -129,11 +133,12 @@ optional explicit as-of date for manual reruns. Use stable keys, sorting, column
 order, date formats, numeric precision, null encoding, and serialization. Keep the
 wall clock and unordered query results out of chart-data output.
 
-For the stateless recent snapshot, the tracked previous export is used only for
-change detection and presentation continuity, never as an ingestion input. The
-approved history/trade exceptions use validated repository snapshots as durable
-inputs. A new checkout with an empty `.data/` must succeed. Avoid incremental dbt
-models that depend on last run's tables.
+For default stateless dashboards, previous exports serve change detection and
+presentation continuity. Electricity's approved recent/history/trade exceptions use
+validated repository snapshots as durable inputs; recent retention is per component.
+A new checkout containing these exports must work with an empty `.data/`. Identical
+prior exports are part of its idempotency inputs. Avoid incremental dbt models that
+depend on last run's tables. See [retention contract](dashboard_partial_refresh.md#approved-durable-state-exception).
 
 Historical time series are allowed: fetch the bounded history from the provider
 on every run. This does **not** preserve what the provider reported on an earlier
@@ -236,6 +241,11 @@ copy the complete data/metadata set into the frontend and validate its build. A
 multi-source snapshot must not silently mix a failed refresh with new data unless
 an explicit per-source freshness contract permits it.
 
+Electricity's [partial-refresh contract](dashboard_partial_refresh.md) is that approved
+exception: source nulls and isolated acquisition failures may yield a validated,
+visibly degraded bundle. Shared corruption, dbt/storage failures and available
+overlap/net contradictions remain hard stops. All frontend and publication gates apply.
+
 **Implemented build prerequisite:** chart-generation failures propagate to a nonzero
 CI result; build checks validate expected dashboard assets and data/HTML consistency.
 Preserve these checks. A superficially successful site build is not sufficient validation.
@@ -274,9 +284,10 @@ For the commit-based MVP:
   includes the changed paths in its build settings. A successful Git push is not
   proof of publication; verify deployment status and the public snapshot in rollout.
 
-On fetch, validation, or build failure, fail the job and leave the published site
-alone. On deployment failure, Cloudflare should continue serving the previous
-successful deployment; confirm that behavior in rollout. Configure failure
+On unhandled fetch, shared validation, or build failure, fail the job and leave the
+published site alone. Electricity's explicitly isolated source failures follow its
+per-component retention contract. On deployment failure, Cloudflare should continue
+serving the previous successful deployment; confirm that behavior in rollout. Configure failure
 notifications and document manual retry/rollback. A published bad snapshot can be
 rolled back to the last good deployment and corrected with a normal follow-up commit.
 
@@ -303,7 +314,7 @@ and start a fresh publishing run to re-verify current release and prepare agains
 current main. Never force-push or roll back good production to repair main.
 No-change publishing runs retry outstanding sync after successful public verification.
 
-The workflow uses **09:17 UTC daily** plus `workflow_dispatch` with boolean
+The workflow uses **06:00 UTC daily** plus `workflow_dispatch` with boolean
 `publish=false` by default, refreshing/validating only the selected ref without
 publication or sync. Publishing requires the main event ref but checks out release.
 GitHub
@@ -334,11 +345,13 @@ and preview builds in the budget. Recheck limits before increasing cadence:
    on released scripts. The September 10 success is historical old-design evidence;
    **new release-first publication and separate sync live verification remain pending**:
 
-- [ ] A cold run succeeds without any previous database, data artifact, or cache.
+- [ ] A cold run succeeds without any previous database or cache; electricity starts
+      from its validated Git-tracked recent/history/trade state.
 - [ ] Running twice against fixed input fixtures/window produces byte-identical
       data; the second publication comparison creates no commit or deployment.
 - [ ] Upstream revisions change the snapshot correctly without duplicate records.
-- [ ] Empty, partial, malformed, and timed-out source responses fail safely.
+- [ ] Empty, partial, malformed, and timed-out source responses follow documented
+      isolation/retention rules; shared failures abort safely and recovery is tested.
 - [ ] Tests cover keys, coverage, units, determinism, and stale-data behavior.
 - [ ] Chart-generation errors fail CI; frontend tests and `npm run build` pass from
       `frontend/`, and expected dashboard assets exist in the output.

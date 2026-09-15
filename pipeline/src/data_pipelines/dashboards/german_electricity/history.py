@@ -20,7 +20,7 @@ import time
 
 from .pipeline import (
     BERLIN, COLUMNS, DEFAULT_OUTPUT, HOUR_MS, MAX_EXPORT_BYTES, SERIES, SOURCE,
-    SmardClient, ValidationError, canonical_bytes, midnight_ms, number,
+    SmardClient, ValidationError, ConsistencyError, ComponentUnavailable, canonical_bytes, midnight_ms, number,
     utc_ms, validate_snapshot,
 )
 
@@ -64,6 +64,10 @@ class DailyClient(SmardClient):
     MAX_ATTEMPTS = 200
     MAX_TOTAL_BYTES = 8_000_000
     FETCH_TIMEOUT = 240
+
+    def get(self, url):
+        self.JSON_DECODER = strict_json
+        return super().get(url)
 
 
 def days(start, end):
@@ -171,7 +175,7 @@ def fetch_daily(client, years):
     return observations
 
 
-def make_rows(observations, start, end):
+def make_rows(observations, start, end, *, nullable=False):
     result, missing = [], []
     for day in days(start, end):
         values = observations[day.year]
@@ -185,7 +189,7 @@ def make_rows(observations, start, end):
                 derived = value is None
                 value = 0
             if value is None:
-                if (day, column) in KNOWN_ENERGY_GAPS:
+                if (day, column) in KNOWN_ENERGY_GAPS or (nullable and day in values[column]):
                     energy[column] = None
                 else:
                     missing.append(f"{day}/{column}")
@@ -196,9 +200,9 @@ def make_rows(observations, start, end):
         if day < PRICE_START:
             if price is not None:
                 raise ValidationError("Previously unknown 2015 price now available; review missing-price policy")
-        elif price is None:
+        elif price is None and not (nullable and day in values["price_old" if day < PRICE_SPLIT else "price"]):
             missing.append(f"{day}/price")
-        else:
+        elif price is not None:
             number(price, "price")
         result.append({"date": day.isoformat(), "hours": hours(day), "energy_gwh": energy,
                        "price_eur_mwh": price, "price_zone": "DE-AT-LU" if day < PRICE_SPLIT else "DE-LU",
@@ -209,8 +213,8 @@ def make_rows(observations, start, end):
     return result
 
 
-def partition(year, rows):
-    value = {"schema_version": 1, "year": year, "timezone": "Europe/Berlin", "source": SOURCE, "rows": rows}
+def partition(year, rows, *, nullable=False):
+    value = {"schema_version": 2 if nullable else 1, "year": year, "timezone": "Europe/Berlin", "source": SOURCE, "rows": rows}
     validate_partition(value)
     return value
 
@@ -220,7 +224,7 @@ def validate_partition(value):
         raise ValidationError("Invalid partition fields")
     year = value["year"]
     if (type(year) is not int or not 2015 <= year <= 9998 or type(value["schema_version"]) is not int
-            or value["schema_version"] != 1 or value["timezone"] != "Europe/Berlin" or value["source"] != SOURCE):
+            or value["schema_version"] not in (1, 2) or value["timezone"] != "Europe/Berlin" or value["source"] != SOURCE):
         raise ValidationError("Invalid partition metadata")
     rows = value["rows"]
     if not isinstance(rows, list) or not 1 <= len(rows) <= 366:
@@ -238,13 +242,13 @@ def validate_partition(value):
         if not isinstance(energy, dict) or set(energy) != set(ENERGY):
             raise ValidationError("Invalid energy series")
         for column, observation in energy.items():
-            if observation is not None or (day, column) not in KNOWN_ENERGY_GAPS:
+            if observation is not None or (value["schema_version"] == 1 and (day, column) not in KNOWN_ENERGY_GAPS):
                 number(observation, column, power_scale=hours(day))
         price = row["price_eur_mwh"]
         if day < PRICE_START:
             if price is not None:
                 raise ValidationError("2015-01-01 through 2015-01-04 must have null prices")
-        else:
+        elif price is not None or value["schema_version"] == 1:
             number(price, "price")
         if row["price_zone"] != ("DE-AT-LU" if day < PRICE_SPLIT else "DE-LU"):
             raise ValidationError("Invalid historical price zone")
@@ -346,6 +350,10 @@ def recent_snapshot(path, as_of):
     validate_snapshot(value)
     end = datetime.fromtimestamp(utc_ms(value["data_through"]) / 1000, BERLIN).date()
     cutoff = end - timedelta(days=1)
+    if value["schema_version"] == 2:
+        if cutoff >= as_of:
+            raise ValidationError("Recent hourly snapshot ahead of --as-of")
+        return value, as_of - timedelta(days=1)
     if not 1 <= (as_of - cutoff).days <= 4:
         raise ValidationError("Recent hourly snapshot is stale/ahead of --as-of; refresh it before history")
     return value, cutoff
@@ -364,12 +372,15 @@ def compare_hourly(rows, snapshot):
             continue
         checked += 1
         for column in SERIES:
+            observed = row["price_eur_mwh"] if column == "price" else row["energy_gwh"][column]
+            if observed is None or len(points) != row["hours"] or any(point[COLUMNS.index(column)] is None for point in points):
+                continue
             total = sum(point[COLUMNS.index(column)] for point in points)
             delta = abs(row["price_eur_mwh"] - total / len(points)) if column == "price" else abs(row["energy_gwh"][column] - total)
             # Each rounded hourly MWh contributes at most 0.005 MWh, plus daily rounding.
             tolerance = 0.011 if column == "price" else (len(points) + 1) * 0.005 / 1000 + 1e-8
             if delta > tolerance:
-                raise ValidationError(f"Daily/hourly mismatch {row['date']}/{column}: delta={delta:.8f}, "
+                raise ConsistencyError(f"Daily/hourly mismatch {row['date']}/{column}: delta={delta:.8f}, "
                                       f"tolerance={tolerance:.8f}; refresh recent snapshot/investigate partial sums")
             if column == "price":
                 price_max = max(price_max, delta)
@@ -461,7 +472,7 @@ def publish_history(directory, manifest, partitions, expected_raw, *, cleanup_ye
 
 
 def run(mode, as_of, directory=DEFAULT_DIRECTORY, *, start_year=2015, end_year=None,
-        reconcile=False, snapshot_path=DEFAULT_OUTPUT, client=None):
+        reconcile=False, snapshot_path=DEFAULT_OUTPUT, client=None, independent=False):
     started = time.monotonic()
     client = client or DailyClient()
     directory = Path(directory)
@@ -477,7 +488,14 @@ def run(mode, as_of, directory=DEFAULT_DIRECTORY, *, start_year=2015, end_year=N
             previous, partitions, previous_raw = load_history(directory, required=mode == "refresh")
             snapshot = None
             if mode == "refresh" or end_year == as_of.year:
-                snapshot, cutoff = recent_snapshot(Path(snapshot_path), as_of)
+                if independent:
+                    snapshot = strict_json(read_bounded(Path(snapshot_path), MAX_EXPORT_BYTES))
+                    validate_snapshot(snapshot)
+                    if utc_ms(snapshot["window_end"]) > midnight_ms(as_of):
+                        raise ValidationError("Recent snapshot ahead of --as-of")
+                    cutoff = as_of - timedelta(days=1)
+                else:
+                    snapshot, cutoff = recent_snapshot(Path(snapshot_path), as_of)
             else:
                 cutoff = date(end_year, 12, 31)
             if previous and cutoff < parse_date(previous["last_date"]):
@@ -499,17 +517,43 @@ def run(mode, as_of, directory=DEFAULT_DIRECTORY, *, start_year=2015, end_year=N
                     raise ValidationError("Refusing to refresh a frozen year; use explicit backfill --reconcile")
             else:
                 years = [year for year in range(start_year, end_year + 1) if reconcile or year not in partitions]
-            observations = fetch_daily(client, years) if years else {}
+            try:
+                observations = fetch_daily(client, years) if years else {}
+            except ValidationError as exc:
+                raise ComponentUnavailable(str(exc)) from exc
+            nullable = independent or (snapshot is not None and snapshot["schema_version"] == 2)
+            if nullable and mode == "refresh" and years:
+                # Daily availability is independent of recent source availability.
+                # Explicit nulls count as reported slots; omitted dates do not.
+                for lag in range(4):
+                    candidate = as_of - timedelta(days=lag + 1)
+                    if candidate.year != as_of.year:
+                        continue
+                    values = observations[as_of.year]
+                    if all(candidate in values[key] for key in SERIES):
+                        cutoff = candidate
+                        break
+                else:
+                    raise ComponentUnavailable("No reported daily boundary within four days")
+                if previous and cutoff < parse_date(previous["last_date"]):
+                    raise ComponentUnavailable("Daily source coverage regressed; retaining previous history")
+                correction_start = max(date(as_of.year, 1, 1), cutoff - timedelta(days=CORRECTION_DAYS - 1))
             fresh = []
             for year in years:
+                # A v2 partition keeps its null contract during explicit closed-year
+                # reconciliation, even without any recent snapshot at rollover.
+                year_nullable = nullable or partitions.get(year, {}).get("schema_version") == 2
                 start = correction_start if mode == "refresh" else date(year, 1, 1)
                 end = min(date(year, 12, 31), cutoff)
                 if end < start:
                     raise ValidationError("No completed days in requested year")
-                rows = make_rows(observations, start, end)
+                try:
+                    rows = make_rows(observations, start, end, nullable=year_nullable)
+                except ValidationError as exc:
+                    raise ComponentUnavailable(str(exc)) from exc
                 fresh.extend(rows)
                 retained = [row for row in partitions.get(year, {}).get("rows", []) if parse_date(row["date"]) < start]
-                partitions[year] = partition(year, retained + rows)
+                partitions[year] = partition(year, retained + rows, nullable=year_nullable)
             if snapshot:
                 metrics.update(compare_hourly(fresh, snapshot))
             if not partitions:

@@ -16,7 +16,6 @@ from expected
 full outer join actual on expected.hour_ms = actual.timestamp
 where expected.hour_ms is null or actual.timestamp is null
 {% for column in series %}
-    or actual.{{ column }} is null
     or not isfinite(actual.{{ column }})
     or actual.{{ column }} < {{ -10000 if column == 'price' else 0 }}
     or actual.{{ column }} > {{ 10000 if column == 'price' else 200 }}

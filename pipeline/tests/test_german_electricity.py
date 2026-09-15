@@ -264,19 +264,18 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual(list(Path(temporary).iterdir()), [output])
 
     def test_pipeline_fetch_validation_and_dbt_failures_preserve_destination(self):
+        from src.data_pipelines.dashboards.german_electricity import partial
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "snapshot.json"
             ge.publish_snapshot(snapshot(), output)
             original = output.read_bytes()
-            with patch.object(ge, "fetch_observations", side_effect=ge.ValidationError("fixture upstream failure")):
+            with patch.object(partial, "acquire", side_effect=ge.ValidationError("fixture shared failure")):
                 with self.assertRaises(ge.ValidationError):
                     ge.run(AS_OF, output)
             values = fixture()
-            del values["gas"][ge.midnight_ms(date(2026, 9, 4))]
-            with patch.object(ge, "fetch_observations", return_value=values):
-                with self.assertRaises(ge.ValidationError):
-                    ge.run(AS_OF, output)
-            with patch.object(ge, "fetch_observations", return_value=fixture()), patch.object(
+            start, end = ge.select_window(values, AS_OF)
+            successes = {key: (points, start, end) for key, points in values.items()}
+            with patch.object(partial, "acquire", return_value=(successes, {})), patch.object(
                 ge, "build_curated", side_effect=subprocess.CalledProcessError(1, "dbt")
             ):
                 with self.assertRaises(subprocess.CalledProcessError):

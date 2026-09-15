@@ -11,6 +11,11 @@ implementation requires deliberate promotion to both branches and new live rollo
 verification; the September 10 success covered the old both-ref design. Closed-year
 reconciliation remains explicit and manually promoted.
 
+The uncommitted [partial-refresh contract](dashboard_partial_refresh.md) adds nullable
+v2 partitions, independent daily cutoffs and source-error retention in a coordinated
+bundle. The manifest and closed historical v1 snapshots remain compatible; no frozen
+exports are rewritten for this feature. Live feature acceptance is pending.
+
 ## Commands and update policy
 
 Run from `pipeline/`, using the existing Python 3.11 dashboard environment:
@@ -44,17 +49,21 @@ needed. Future as-of dates and dates before source availability are rejected.
   was not captured before rollover, refresh deliberately fails. Run an explicit
   prior-year `backfill --reconcile` after source completion, then refresh. No
   automatic prior-year fetch/correction exception is hidden in routine refresh.
-- `--as-of` is a Berlin run date, not an archived source vintage. Current-year
-  backfill and refresh use the validated recent hourly snapshot's exclusive
-  `data_through` boundary minus one Berlin day as the cutoff. It must be between
-  `as_of - 4` and `as_of - 1`. Historical closed-year-only backfills need no recent
-  snapshot. Refresh the recent snapshot first in an operational workflow.
+- `--as-of` is a Berlin run date, not an archived source vintage. With recent v1,
+  current-year backfill/refresh retains the legacy recent-bound cutoff between
+  `as_of - 4` and `as_of - 1`. With recent v2, routine refresh selects its own latest
+  reported daily boundary within that range; explicit nulls count as reported slots.
+  Current-year backfill starts from the previous-day limit with v2. Historical
+  closed-year-only backfills need no recent snapshot. Use the coordinated
+  [`.refresh` command](dashboard_partial_refresh.md#coordinated-cli-failure-boundary-and-recovery)
+  for routine recent → history → trade staging and status updates.
 
 The history module uses the standard library for already-daily source values:
 strict parsing, date alignment, MWh→GWh conversion, historical price stitching,
 validation, and deterministic export. There is no aggregation requiring another
-dbt model or DuckDB staging copy. Its completeness reference remains the existing
-fresh DuckDB + focused dbt hourly pipeline; neither path opens a persistent DB.
+dbt model or DuckDB staging copy. Available overlapping values are checked against
+the fresh DuckDB + focused dbt hourly pipeline; daily availability is independent
+under v2. Neither path opens a persistent DB.
 
 ## Official source, units, and coverage
 
@@ -90,7 +99,7 @@ load; pumped storage is discharge. Generation minus load is not a trade series.
   pre-shutdown nuclear fails. The nuclear index is still checked during refresh,
   so a newly published current-year chunk is validated rather than ignored.
 
-### Five real missing energy values: explicit null policy
+### Five historical missing energy values: v1 null policy
 
 The complete live daily audit found precisely these five missing series-days.
 Each was separately checked against its official weekly hourly chunk: **24
@@ -104,11 +113,13 @@ observations, all 24 null**. No hourly fallback can reconstruct them.
 | 2018-08-03 | pumped_storage / 4070 | 1532901600000 |
 | 2018-08-23 | pumped_storage / 4070 | 1534716000000 |
 
-**All five dates remain in the exported sequence.** Only the named energy field
-may be null. All other energy fields/dates require finite nonnegative numbers.
+**All five dates remain in the exported sequence.** In v1 only the named energy
+field may be null. All other energy fields/dates require finite nonnegative numbers.
 No imputation, generic missing→zero conversion, or hidden dropped days is allowed.
 If the source eventually supplies these values, explicit reconciliation may store
-the numeric correction. Newly discovered gaps fail pending a documented decision.
+the numeric correction. V1 rejects newly discovered gaps. V2 accepts explicit null
+source observations under the [nullable partition contract](dashboard_partial_refresh.md#daily-history-partitions-v2-and-independent-cutoff);
+omitted required dates and malformed values still fail source acquisition.
 
 Read-only audit (182 daily requests + four deduplicated hourly diagnostic requests):
 
@@ -116,7 +127,7 @@ Read-only audit (182 daily requests + four deduplicated hourly diagnostic reques
 PYTHONPATH=. python -m src.data_pipelines.dashboards.german_electricity.audit_history --as-of 2026-09-10 --recent-snapshot /path/to/validated-recent.json
 ```
 
-## Exact static JSON contract, schema 1
+## Exact static JSON contract: manifest v1, partitions v1/v2
 
 `manifest.json` has exactly:
 
@@ -139,7 +150,8 @@ PYTHONPATH=. python -m src.data_pipelines.dashboards.german_electricity.audit_hi
 }
 ```
 
-Each partition has exactly:
+Each partition has exactly the fields below. The example is frozen v1; nullable
+partitions use `schema_version: 2` without changing the field layout:
 
 ```text
 {
@@ -157,9 +169,10 @@ Each partition has exactly:
 }
 ```
 
-The energy keys above have numeric values, except the five narrowly allowlisted
-nulls. This is the required missing-day clarification to the otherwise numeric
-energy contract. `price_eur_mwh` is numeric except the four 2015 dates.
+In v1 the energy keys above are numeric except the five narrowly allowlisted nulls;
+`price_eur_mwh` is numeric except the four 2015 dates. V2 permits additional explicit
+null energy/price observations, while retaining historical/nuclear policies and
+the complete date sequence. Closed v1 partition bytes are retained.
 `price_zone` is exactly `DE-AT-LU` or `DE-LU`; the boolean is always present.
 Rows and years are ascending and contiguous, every partition starts 1 January,
 and only the final partition may end before 31 December. Frozen can be true for
@@ -187,7 +200,8 @@ before parsing in browser/build code. Never rewrite JSON during static copying.
 - For missing energy inputs, show gaps/incomplete coverage in derived generation
   totals or renewable shares. Aggregating available values must explicitly say
   “known values” and report coverage. A null must never become zero through JS
-  arithmetic/coercion. Load remains complete on these five dates.
+  arithmetic/coercion. Load is assessed independently from generation; it remains
+  complete on these five historical dates. See [null-safe metrics](dashboard_partial_refresh.md#null-safe-frontend-metrics).
 - Renewable sources exclude pumped storage and nuclear. Changes in price zone
   must be visible in historical methodology. Daily averages hide intraday peaks.
 
@@ -210,7 +224,8 @@ zone's years (both chunks in 2018), and do not request absent nuclear chunks.
 - Shared strict HTTP client: at most three concurrent requests, at most three
   attempts per URL with bounded transient retry/backoff, 15-second socket timeout,
   240-second fetch deadline. History hard cap is **200 total attempts including
-  retries**, 8 MB total bodies, 256 KB per response. Exhaustion fails publication.
+  retries**, 8 MB total bodies, 256 KB per response. Exhaustion fails this component;
+  coordinated refresh retains the original history and records stale status.
 - Partition cap 250 KB; manifest cap 20 KB. The 12-year set is about 1.7 MB; this is
   an approved increase over the initial recent-only 1 MB target, served lazily.
 - Validate all required daily entries, calendar continuity/leap/DST hours, types,
@@ -218,13 +233,21 @@ zone's years (both chunks in 2018), and do not request absent nuclear chunks.
   historical policies. Entire raw chunks are checked for malformed values and
   unexpected nonzero nuclear, including dates outside the selected export window.
 - Every freshly fetched day overlapping the validated recent snapshot is compared
-  to hourly energy sums and mean prices. Rounding tolerance is
+  per series where the daily value and all expected hourly values are numeric.
+  Null/unavailable comparisons are skipped, not treated as equality. Rounding tolerance is
   `(hours + 1) * 0.005 / 1000 + 1e-8 GWh` and `0.011 EUR/MWh`. No percentage-based
   tolerance hides partial daily totals. Source revisions between recent and daily
-  reads can fail this check: regenerate the recent snapshot and retry; do not
+  reads can hard-fail the entire coordinated bundle: regenerate through `.refresh`
+  and investigate available contradictions; do not
   loosen tolerance. Older historical daily sums remain subject to the caveat above.
 
 ## Atomic publication, retention, recovery
+
+The following describes the standalone history writer. The coordinated
+[bundle writer](dashboard_partial_refresh.md#coordinated-cli-failure-boundary-and-recovery)
+adds original-byte guards and handled rollback across recent/history/trade, with
+recent component status promoted last. Source `ComponentUnavailable` retains the
+original history; schema, consistency, state and storage errors abort the bundle.
 
 A local advisory exclusive lock on the output directory inode serializes writers
 (macOS/Linux). Readers do not need the lock. Cross-runner jobs must also serialize
@@ -303,17 +326,19 @@ on 10 September, advancing both through **9 September 2026**: 4,270 daily rows,
 history refresh 2.602 seconds (27 history requests); all 30 overlap dates passed.
 This replaces the mismatched initial recent/history source vintages described above.
 
-The build now verifies the recent and history snapshots against each other, including
-their matching cutoff and every overlapping day, with the same energy/price tolerances.
+The build verifies recent/history hashes and available overlapping values with the
+same energy/price tolerances. Matching cutoffs remain a v1 rule; recent v2 permits
+independent cutoffs and validates embedded history status against the manifest.
 Individually valid hashes alone are not enough to publish an inconsistent pair.
 The frontend starts on YTD, with recent 1/7/30-day views and a year selector back to
 2015. Historical files are loaded on demand and verified by raw-byte SHA-256. Five
 source gaps stay visible; affected energy summaries report covered days and partial
 sums rather than presenting incomplete observations as full-year totals.
 
-The daily/manual workflow tests all electricity pipeline paths, refreshes recent
-first, then current-year history and monthly trade, validates the frontend, and
-retains snapshots and referenced history files in its short-lived review artifact.
+The daily/manual workflow tests all electricity pipeline paths, stages recent
+first, then independent current-year history and monthly trade through `.refresh`,
+validates the frontend, and retains snapshots and referenced history files in its
+short-lived review artifact.
 Publishing requires the main event ref, then explicitly checks out release and
 guards `HEAD == origin/releases/cloudflare`, independent of main's position.
 Released scripts/runtime/frontend validate allowlisted data before a release-only

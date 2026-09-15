@@ -22,7 +22,8 @@ test('the entire real manifest passes Node and WebCrypto raw-byte checks, includ
     const raw = rawYear(item.year);
     const verified = await history.verifyPartition(raw, item, webcrypto.subtle);
     expect(build.verifyPartition(raw, item)).toEqual(verified);
-    gaps += verified.rows.filter((row) => !history.complete(row)).length;
+    // Frozen v1 years keep the five documented gaps; v2 years may add new ones.
+    if (verified.schema_version === 1) gaps += verified.rows.filter((row) => !history.complete(row)).length;
   }
   expect(gaps).toBe(5);
 });
@@ -101,7 +102,7 @@ test('nuclear is numeric, zero after shutdown, and derived zeros are explicitly 
   expect(() => history.validatePartition(p, entry(2023))).toThrow();
 });
 
-test.each([[2016, 365, 366], [2018, 361, 365]])('all %i energy KPIs use the same complete-day denominator', (year, days, total) => {
+test.each([[2016, 365, 366], [2018, 361, 365]])('%i generation uses compatible days; load has independent coverage', (year, days, total) => {
   const p = partition(year);
   const summary = history.summarize(p);
   expect(summary.completeDays).toBe(days);
@@ -109,9 +110,10 @@ test.each([[2016, 365, 366], [2018, 361, 365]])('all %i energy KPIs use the same
   const known = p.rows.filter(history.complete);
   const hours = known.reduce((sum, row) => sum + row.hours, 0);
   expect(summary.hours).toBe(hours);
-  const load = known.reduce((sum, row) => sum + row.energy_gwh.load, 0);
+  const loads = p.rows.filter((row) => row.energy_gwh.load !== null);
+  const load = loads.reduce((sum, row) => sum + row.energy_gwh.load, 0);
   expect(summary.loadEnergy).toBe(load);
-  expect(summary.loadAverage).toBe(load / hours);
+  expect(summary.loadAverage).toBe(load / loads.reduce((sum, row) => sum + row.hours, 0));
   for (const source of summary.mix) {
     const energy = known.reduce((sum, row) => sum + row.energy_gwh[source.key], 0);
     expect(source.energy).toBe(energy);
@@ -198,7 +200,9 @@ test('publication check requires identical raw files and the exact pinned HTML m
     fs.copyFileSync(path.join(__dirname, '../src/_data/germanElectricity.json'), path.join(temp, 'data/german-electricity.json'));
     const page = path.join(temp, 'dashboards/strom/index.html');
     fs.mkdirSync(path.dirname(page), { recursive: true });
-    fs.writeFileSync(page, `<script type="application/json" id="electricity-history-manifest">${history.safeJSON(manifest)}</script>`);
+    const recent = JSON.parse(fs.readFileSync(path.join(temp, 'data/german-electricity.json')));
+    const status = recent.schema_version === 2 ? `<script type="application/json" id="electricity-component-data">${history.safeJSON({ components: recent.components, refresh_status: recent.refresh_status })}</script>` : '';
+    fs.writeFileSync(page, `${status}<script type="application/json" id="electricity-history-manifest">${history.safeJSON(manifest)}</script>`);
     expect(() => build.verifyPublished(temp)).not.toThrow();
     const recentFile = path.join(temp, 'data/german-electricity.json');
     const original = fs.readFileSync(recentFile);
@@ -207,7 +211,7 @@ test('publication check requires identical raw files and the exact pinned HTML m
     fs.writeFileSync(recentFile, JSON.stringify(changed));
     expect(() => build.verifyPublished(temp)).toThrow('Published recent snapshot differs');
     fs.writeFileSync(recentFile, original);
-    fs.writeFileSync(page, '<p>Different deployment</p>');
+    fs.writeFileSync(page, `${status}<p>Different deployment</p>`);
     expect(() => build.verifyPublished(temp)).toThrow('HTML/history manifest mismatch');
     fs.writeFileSync(path.join(published, path.basename(entry(2018).url)), Buffer.concat([rawYear(2018), Buffer.from('\n')]));
     expect(() => build.verifyPublished(temp)).toThrow('SHA-256');

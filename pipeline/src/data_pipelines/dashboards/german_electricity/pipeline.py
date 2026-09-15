@@ -1,13 +1,14 @@
 """Fetch → temporary staging → selected dbt build/tests → atomic JSON snapshot.
 
 Run from pipeline/ with PYTHONPATH=.; all raw values stay in temporary storage.
-The previous snapshot is used solely for verified no-change detection.
+Validated previous exports provide timestamp-aligned per-series failure retention.
 """
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time as day_time, timedelta, timezone
 import hashlib
+from http.client import HTTPException
 import json
 import math
 import os
@@ -63,6 +64,14 @@ class ValidationError(ValueError):
     """Upstream data or an export fails the dashboard contract."""
 
 
+class ConsistencyError(ValidationError):
+    """Available independently sourced values contradict; never degrade silently."""
+
+
+class ComponentUnavailable(ValidationError):
+    """An upstream component cannot supply a valid refresh; retain its prior export."""
+
+
 def midnight_ms(day):
     return int(datetime.combine(day, day_time(), BERLIN).timestamp() * 1000)
 
@@ -86,7 +95,9 @@ def utc_ms(value):
 
 def number(value, column, power_scale=1):
     # bool is an int subclass, but is never an observation.
-    if type(value) not in (int, float) or not math.isfinite(value):
+    # Python integers are finite but can overflow conversion inside math.isfinite.
+    # Compare them directly against the bounds below, without float conversion.
+    if type(value) not in (int, float) or (type(value) is float and not math.isfinite(value)):
         raise ValidationError(f"{column}: expected a finite JSON number")
     if column == "price":
         if not -10_000 <= value <= 10_000:
@@ -153,7 +164,7 @@ class SmardClient:
                 if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
                     raise ValidationError(f"SMARD HTTP {exc.code}: {url}") from exc
                 exc.close()
-            except (URLError, TimeoutError, socket.timeout, ConnectionError) as exc:
+            except (URLError, TimeoutError, socket.timeout, ConnectionError, HTTPException) as exc:
                 if attempt == 2:
                     raise ValidationError(f"SMARD request failed: {url}") from exc
             time.sleep(2 ** attempt)
@@ -275,7 +286,7 @@ def build_curated(observations, start, end, directory):
         ).fetchall()]
 
 
-def make_snapshot(rows, start, end, created_at=None, *, now_ms=None):
+def make_snapshot(rows, start, end, created_at=None, *, now_ms=None, components=None, refresh_status=None):
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
     snapshot = {
         "schema_version": 1,
@@ -290,6 +301,8 @@ def make_snapshot(rows, start, end, created_at=None, *, now_ms=None):
         "expected_update": "daily",
         "stale_after_hours": 96,
     }
+    if components is not None:
+        snapshot.update(schema_version=2, components=components, refresh_status=refresh_status or {})
     snapshot["content_hash"] = hashlib.sha256(canonical_bytes(snapshot)).hexdigest()
     snapshot["snapshot_created_at"] = created_at or iso_utc(now_ms)
     validate_snapshot(snapshot, now_ms=now_ms)
@@ -300,9 +313,11 @@ def validate_snapshot(snapshot, *, now_ms=None):
     """Validate semantic content and creation-time bounds against the current clock."""
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
     keys = {"schema_version", "source", "timezone", "window_start", "window_end", "data_through", "snapshot_created_at", "content_hash", "columns", "rows", "units", "expected_update", "stale_after_hours"}
+    if isinstance(snapshot, dict) and snapshot.get("schema_version") == 2:
+        keys |= {"components", "refresh_status"}
     if not isinstance(snapshot, dict) or set(snapshot) != keys:
         raise ValidationError("Invalid snapshot fields")
-    if (type(snapshot["schema_version"]) is not int or snapshot["schema_version"] != 1
+    if (type(snapshot["schema_version"]) is not int or snapshot["schema_version"] not in (1, 2)
             or snapshot["source"] != SOURCE or snapshot["timezone"] != "Europe/Berlin"
             or snapshot["columns"] != COLUMNS or snapshot["units"] != {"power": "GW", "price": "EUR/MWh"}
             or snapshot["expected_update"] != "daily" or type(snapshot["stale_after_hours"]) is not int
@@ -325,7 +340,11 @@ def validate_snapshot(snapshot, *, now_ms=None):
         if not isinstance(row, list) or len(row) != len(COLUMNS) or type(row[0]) is not int or row[0] != expected:
             raise ValidationError("Missing, duplicate, unordered, or malformed hourly row")
         for column, value in zip(COLUMNS[1:], row[1:]):
-            number(value, column)
+            if value is not None or snapshot["schema_version"] == 1:
+                number(value, column)
+    if snapshot["schema_version"] == 2:
+        from .partial import validate_components
+        validate_components(snapshot)
     expected_hash = hashlib.sha256(canonical_bytes(semantic_content(snapshot))).hexdigest()
     if snapshot["content_hash"] != expected_hash:
         raise ValidationError("Snapshot content hash mismatch")
@@ -365,30 +384,8 @@ def publish_snapshot(snapshot, output, *, now_ms=None):
 
 
 def run(as_of, output, client=None):
-    started = time.monotonic()
-    client = client or SmardClient()
-    metrics = {"as_of": as_of.isoformat()}
-    try:
-        observations = fetch_observations(client, as_of)
-        metrics["fetch_seconds"] = round(time.monotonic() - started, 3)
-        start, end = select_window(observations, as_of)
-        dbt_started = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix="databearer-german-electricity-") as temporary:
-            rows = build_curated(observations, start, end, Path(temporary))
-            snapshot = make_snapshot(rows, start, end)
-        metrics["transform_validate_seconds"] = round(time.monotonic() - dbt_started, 3)
-        changed, size = publish_snapshot(snapshot, output)
-        metrics.update(status="changed" if changed else "unchanged", rows=len(rows), export_bytes=size,
-                       window_start=snapshot["window_start"], window_end=snapshot["window_end"],
-                       content_hash=snapshot["content_hash"])
-        return metrics
-    except Exception:
-        metrics["status"] = "failed"
-        raise
-    finally:
-        metrics.update(requests=client.requests, bytes_downloaded=client.bytes_downloaded,
-                       total_seconds=round(time.monotonic() - started, 3))
-        print(json.dumps(metrics, sort_keys=True), flush=True)
+    from .partial import refresh_recent
+    return refresh_recent(as_of, Path(output), client=client)
 
 
 def main():

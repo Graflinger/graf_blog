@@ -20,7 +20,7 @@
     fields(snapshot, ['schema_version', 'kind', 'source', 'region', 'timezone', 'first_month', 'last_month', 'revision_policy', 'rows', 'content_hash']);
     fields(snapshot.source, Object.keys(recent.SOURCE));
     assert(Object.entries(recent.SOURCE).every(([key, value]) => snapshot.source[key] === value), 'Ungültige Quelle');
-    assert(snapshot.schema_version === 1 && snapshot.kind === 'german-electricity-trade' && snapshot.region === 'DE-LU' && snapshot.timezone === recent.TIMEZONE && snapshot.first_month === '2019-01' && snapshot.revision_policy === POLICY, 'Unbekannte Metadaten');
+    assert([1, 2].includes(snapshot.schema_version) && snapshot.kind === 'german-electricity-trade' && snapshot.region === 'DE-LU' && snapshot.timezone === recent.TIMEZONE && snapshot.first_month === '2019-01' && snapshot.revision_policy === POLICY, 'Unbekannte Metadaten');
     assert(typeof snapshot.content_hash === 'string' && /^[a-f0-9]{64}$/.test(snapshot.content_hash), 'Ungültiger content_hash');
     const first = monthIndex(snapshot.first_month), last = monthIndex(snapshot.last_month);
     assert(Number.isFinite(now) && snapshot.last_month < recent.dayKey(now).slice(0, 7), 'Unvollständiger oder zukünftiger Monat');
@@ -31,7 +31,7 @@
       for (const field of ['missing_series', 'structural_zero_series']) {
         assert(Array.isArray(row[field]) && row[field].every((id, i, ids) => Number.isInteger(id) && IDS.includes(id) && (!i || id > ids[i - 1])), 'Ungültige Serienliste');
       }
-      assert(row.missing_series.every((id) => STARTS[id] === row.month), 'Unbekannte Quellenlücke');
+      assert(snapshot.schema_version === 2 || row.missing_series.every((id) => STARTS[id] === row.month), 'Unbekannte Quellenlücke');
       assert(row.structural_zero_series.every((id) => STARTS[id] && row.month < STARTS[id]), 'Ungültige strukturelle Null');
       if (row.missing_series.length) assert(TOTALS.every((key) => row[key] === null), 'Fehlende Quelle erfordert drei Nullwerte');
       else {

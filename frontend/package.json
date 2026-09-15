@@ -12,6 +12,7 @@
     "lint:fix": "npm run lint -- --fix",
     "format": "prettier --write .",
     "test": "jest",
+    "test:v2": "node tests/fixtures/run-v2-gate.js",
     "test:watch": "jest --watch"
   },
   "keywords": [],

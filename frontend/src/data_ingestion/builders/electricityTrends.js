@@ -6,6 +6,7 @@ const history = require('../../js/dashboards/electricity-history');
 const electricity = require('../../js/dashboards/electricity-data');
 const trade = require('../../js/dashboards/electricity-trade');
 const { readHistory } = require('./electricityHistory');
+const { verifySnapshot } = require('./electricitySnapshot');
 
 const TRADE_PATH = path.resolve(__dirname, '../../_data/germanElectricityTrade.json');
 const ANNUAL_PATH = path.resolve(__dirname, '../../_data/germanElectricityAnnual.json');
@@ -88,6 +89,8 @@ function readTrends() {
   const stat = fs.lstatSync(TRADE_PATH);
   if (!stat.isFile() || stat.size > 250000) throw new Error('Ungültige Handelsdatei');
   const snapshot = verifyTrade(fs.readFileSync(TRADE_PATH));
+  const recent = verifySnapshot(fs.readFileSync(path.resolve(__dirname, '../../_data/germanElectricity.json'), 'utf8'));
+  if (recent.refresh_status?.trade && recent.refresh_status.trade.data_through !== snapshot.last_month) throw new Error('Trade/status cutoff mismatch');
   let annual = null;
   let annualStat;
   try { annualStat = fs.lstatSync(ANNUAL_PATH); }

@@ -10,6 +10,13 @@ Deliberately promote this implementation to **both `main` and
 `main` alone is insufficient: the workflow definition runs from `main`, but
 publishing explicitly checks out the release branch for scripts, runtime, and frontend.
 
+The uncommitted [partial-refresh feature](dashboard_partial_refresh.md) requires the
+same deliberate manual code promotion to both branches. Its implementation and PR
+are authorized, **not production rollout during this task**. No live refresh/deploy
+acceptance of this feature has occurred, and frozen exports are not rewritten for
+code promotion. The September 14 baseline recorded in
+[runtime notes](dashboard_refresh_improvements.md) predates this feature.
+
 Historical evidence, distinct from this rollout:
 
 - **10 September 2026:** [manual run 34532806712](https://github.com/Graflinger/databearer/actions/runs/34532806712)
@@ -29,7 +36,7 @@ work does not gate production data refreshes.
 
 ## Trigger, branch gate, and publication scope
 
-- Schedule: **06:0 UTC daily**, cron `0 6 * * *` (10:17 MEZ / 11:17 MESZ).
+- Schedule: **06:00 UTC daily**, cron `0 6 * * *` (07:00 MEZ / 08:00 MESZ).
   Scheduling is best effort, not a promised publication time.
 - Manual `workflow_dispatch`: boolean **`publish`, default `false`**. The default
   refreshes/validates the selected ref only and retains a seven-day review artifact;
@@ -78,10 +85,16 @@ still need verification.
    Python tests (`test_german_electricity*.py`). Tests for annual/progress use
    fixtures; they do not authorize live refreshes of those sources. Run the
    publication, synchronization, and verifier safeguards in `scripts/tests/` too.
-3. Refresh recent hourly data in a fresh temporary DuckDB database with the focused
-   dbt selection and tests.
-4. Refresh current-year daily history, checking its overlap with the recent export.
-5. Refresh monthly DE–LU commercial trade against the validated history cutoff.
+3. Run `python -m src.data_pipelines.dashboards.german_electricity.refresh` from
+   `pipeline/` with `PYTHONPATH=.`. It validates the existing bundle and stages recent
+   per-component refresh in a fresh temporary DuckDB database with focused dbt tests.
+4. Within that coordinator, attempt current-year history using its independent
+   reported-day cutoff and available recent overlap, then monthly DE–LU trade
+   against the validated history cutoff, even after an isolated source failure.
+5. Validate and promote the complete local candidate bundle with embedded statuses.
+   Source `ComponentUnavailable` retains original history/trade; recent failures
+   retain per-series last-good values. Shared errors and available contradictions
+   abort the bundle. See [failure boundary and CLI](dashboard_partial_refresh.md#coordinated-cli-failure-boundary-and-recovery).
 6. Use **Node 20** for frontend tests, lint, and production build. The build validates
    recent/history overlap, hashes, trends, progress, and rendered exports/HTML.
    The current workflow also runs these checks on unchanged data.
@@ -106,6 +119,11 @@ installation/test/build cost when a merge candidate changes `main`; the whole wo
 is no longer bounded to ten minutes. No-change publishing runs can still incur that
 sync cost when integration is outstanding. Keep daily cadence and account for
 ordinary blog/preview builds.
+
+Partial refresh can take longer than the old early-abort path because healthy
+components are still attempted, with additional staging/validation and regression
+test cost. Existing request/worker/deadline bounds remain; measure feature runtime
+at authorized rollout rather than treating old timings as acceptance.
 
 See [refresh timing and deferred improvements](dashboard_refresh_improvements.md)
 for the September 14 live timing baseline, SMARD publication-time findings, and
@@ -160,7 +178,8 @@ with:
   coverage;
 - `/data/german-electricity-progress.json`: the separately maintained snapshot;
 - `/dashboards/strom/`: snapshot markers, embedded manifest/trends/progress JSON,
-  expected script links, and active dashboard navigation.
+  expected script links, active dashboard navigation, and v2 embedded recent
+  components/history/trade refresh status matching the intended local snapshot.
 
 Missing, old, or mismatched remote data fails the run after the polling budget.
 **No-change publishing runs still verify deployment.** Verification is read-only:
@@ -227,9 +246,15 @@ routine precondition or silently change data contracts to make a merge pass.
 
 ## Failure and recovery
 
-- **Source, validation, or build failure:** fail without pushing. The last published
-  snapshot remains the serving target; local intermediate outputs are not publication.
-  Investigate the failing source/contract and rerun from the current released base.
+- **Isolated source failure:** retain the affected validated component and expose
+  stale/unavailable status while healthy components may advance. Explicit source
+  nulls may advance as partial data. The next bounded coordinated run retries and
+  recalculates statuses on recovery; it does not fill nulls or widen correction
+  windows. See [partial-refresh recovery](dashboard_partial_refresh.md#coordinated-cli-failure-boundary-and-recovery).
+- **Shared validation, consistency, storage, or build failure:** fail without pushing.
+  The last published snapshot remains the serving target; local intermediate outputs
+  are not publication. Investigate the failing contract and rerun from the current
+  released base. Restore a coherent bundle after an interrupted local multi-file write.
 - **Production branch movement or rejected release push:** fetch/review the release
   tip and start a fresh publishing run from it. Main need not equal release. Do not
   force-push or retry a stale prepared commit over concurrent work.
@@ -281,12 +306,15 @@ PYTHONPATH=. python -m src.data_pipelines.dashboards.german_electricity.history 
 PYTHONPATH=. python -m src.data_pipelines.dashboards.german_electricity.history refresh
 PYTHONPATH=. python -m src.data_pipelines.dashboards.german_electricity.trade backfill --start-year YEAR --end-year YEAR --reconcile
 PYTHONPATH=. python -m src.data_pipelines.dashboards.german_electricity.trade refresh
+PYTHONPATH=. python -m src.data_pipelines.dashboards.german_electricity.refresh
 ```
 
 Choose only the affected reconciliation steps after inspecting coverage. See the
 [history](german_electricity_history.md) and [trade](electricity_trade.md) contracts
 for cutoff/continuity requirements. Recovery that changes closed years is a manual
 reviewed release, not a daily publisher rerun.
+The final coordinated run recomputes embedded statuses/cutoffs after standalone
+reconciliation; standalone commands do not maintain the whole bundle's metadata.
 
 References: [architecture](dashboard_architecture.md),
 [frontend checks](../frontend/README-dashboard.md),

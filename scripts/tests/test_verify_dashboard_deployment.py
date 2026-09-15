@@ -5,6 +5,7 @@ Run: python3 -B -m unittest discover -s scripts/tests -p 'test_verify_dashboard_
 
 import copy
 import hashlib
+from html import escape
 from http.client import IncompleteRead
 import importlib.util
 import io
@@ -85,6 +86,28 @@ class DeploymentTests(unittest.TestCase):
         target.write_bytes(raw)
 
     def html(self):
+        report = ""
+        if self.recent.get("schema_version") == 2:
+            status = {key: self.recent[key] for key in ("components", "refresh_status")}
+            def fields(values):
+                return "".join(f'<span data-component-field="{key}">{escape(str(value))}</span>' for key, value in values.items())
+            rows = ""
+            for key, meta in status["components"].items():
+                cells = {"label": verify.COMPONENT_LABELS[key], "status": verify.COMPONENT_STATUS[meta["status"]],
+                         "coverage": f"{meta['known_hours']}/{meta['expected_hours']}",
+                         "observed": meta["source_observed_through"] or "–",
+                         "success": meta["last_successful_window_end"] or "–"}
+                rows += f'<tr data-component="{key}">' + fields(cells).replace("<span ", "<td ").replace("</span>", "</td>") + '</tr>'
+            retained = ""
+            for key, meta in status["refresh_status"].items():
+                retained += f'<p data-refresh="{key}">' + fields({
+                    "label": "Tageshistorie" if key == "history" else "Monatlicher Handel",
+                    "status": verify.REFRESH_STATUS[meta["status"]], "through": meta["data_through"]}) + '</p>'
+            report = ('<p id="electricity-partial-warning">Teilaktualisierung: Fehlende Werte sind keine Nullen.</p>'
+                      '<details id="electricity-component-report" open><summary>Quellenstände</summary>'
+                      f'<table><tbody>{rows}</tbody></table>{retained}</details>'
+                      '<script type="application/json" id="electricity-component-data">'
+                      + encoded(status).decode() + '</script>')
         inline = "".join(f'<script type="application/json" id="{identity}">{encoded(value).decode()}</script>'
                          for identity, value in (("electricity-history-manifest", self.manifest),
                                                  ("electricity-trends-data", self.trends),
@@ -92,7 +115,7 @@ class DeploymentTests(unittest.TestCase):
         scripts = "".join(f'<script src="{src}" defer></script>' for src in sorted(verify.SCRIPTS))
         return (f'<html><nav class="topics-nav"><a href="/dashboards/" aria-current="page">Dashboards</a></nav>'
                 f'<article data-through="{self.recent["data_through"]}" id="electricity-dashboard" '
-                f'data-hash="{self.recent["content_hash"]}"></article>{inline}{scripts}</html>').encode()
+                f'data-hash="{self.recent["content_hash"]}">{report}</article>{inline}{scripts}</html>').encode()
 
     def fetch(self, url, timeout):
         self.requests.append((url, timeout))
@@ -119,6 +142,75 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn(self.closed["url"], paths)
         self.assertEqual(self.clock.sleeps, [])
         self.assertIn("Deployment verified", self.messages[-1])
+
+    def test_v2_requires_matching_public_component_status(self):
+        self.recent.update(schema_version=2, components={"price": {"status": "partial", "known_hours": 696,
+                           "expected_hours": 720, "source_observed_through": "2026-09-08T22:00:00Z",
+                           "last_successful_window_end": "2026-09-09T22:00:00Z"}},
+                           refresh_status={"history": {"status": "stale", "data_through": "2026-09-09"}})
+        self.expected['recent'] = self.recent
+        self.public[verify.RECENT] = encoded(self.recent)
+        with self.assertRaisesRegex(verify.VerificationError, 'component status'):
+            verify.verify_once(self.expected, self.public.__getitem__)
+        self.public[verify.PAGE] = self.html()
+        verify.verify_once(self.expected, self.public.__getitem__)
+        self.public[verify.PAGE] = self.public[verify.PAGE].replace(b'"known_hours":696', b'"known_hours":720')
+        with self.assertRaisesRegex(verify.VerificationError, 'coverage/status'):
+            verify.verify_once(self.expected, self.public.__getitem__)
+
+    def test_v2_visible_report_rejects_mismatched_missing_hidden_and_retained_disclosures(self):
+        self.recent.update(schema_version=2, components={
+            "price": {"status": "partial", "known_hours": 600, "expected_hours": 720,
+                      "source_observed_through": "2026-09-04T22:00:00Z",
+                      "last_successful_window_end": "2026-09-09T22:00:00Z"},
+            "gas": {"status": "stale", "known_hours": 0, "expected_hours": 720,
+                    "source_observed_through": "2026-07-01T22:00:00Z", "last_successful_window_end": "2026-07-01T22:00:00Z"},
+            "solar": {"status": "unavailable", "known_hours": 0, "expected_hours": 720,
+                      "source_observed_through": None, "last_successful_window_end": None}},
+            refresh_status={"history": {"status": "stale", "data_through": "2026-09-09"},
+                            "trade": {"status": "partial", "data_through": "2026-08"}})
+        self.expected["recent"] = self.recent
+        self.public[verify.RECENT] = encoded(self.recent)
+        html = self.html()
+        self.public[verify.PAGE] = html
+        verify.verify_once(self.expected, self.public.__getitem__)
+        changes = [
+            (b'>600/720<', b'>720/720<'),
+            (b'>teilweise<', '>vollständig<'.encode()),
+            (b'>beibehalten / veraltet<', '>vollständig<'.encode()),
+            (b'>beibehalten nach fehlgeschlagener Aktualisierung<', b'>erfolgreich aktualisiert<'),
+            (b'>2026-09-04T22:00:00Z<', b'>2026-09-09T22:00:00Z<'),
+            (b'data-component="price"', b'data-component="other"'),
+            (b'data-refresh="history"', b'data-refresh="other"'),
+            (b'data-refresh="trade"', b'data-refresh="other"'),
+            (b'id="electricity-component-report"', b'id="missing-report"'),
+            (b'id="electricity-component-report" open', b'id="electricity-component-report"'),
+            (b'id="electricity-partial-warning"', b'id="electricity-partial-warning" hidden'),
+            (b'<table>', b'<table hidden>'),
+            (b'<table>', b'<table style="display: none">'),
+            (b'<table>', b'<table aria-hidden="true">'),
+            (b'<table>', b'<table style="opacity:0">'),
+            (b'data-component-field="coverage"', b'hidden data-component-field="coverage"'),
+            (b'<details ', b'<noscript><details '),
+            (b'data-component="gas"', b'data-component="price"'),
+        ]
+        for old, new in changes:
+            with self.subTest(change=new):
+                self.public[verify.PAGE] = html.replace(old, new)
+                with self.assertRaises(verify.VerificationError):
+                    verify.verify_once(self.expected, self.public.__getitem__)
+
+    def test_healthy_v2_report_may_be_collapsed_without_a_partial_warning(self):
+        self.recent.update(schema_version=2, components={"price": {
+            "status": "complete", "known_hours": 720, "expected_hours": 720,
+            "source_observed_through": "2026-09-09T22:00:00Z",
+            "last_successful_window_end": "2026-09-09T22:00:00Z"}},
+            refresh_status={"history": {"status": "ok", "data_through": "2026-09-09"}})
+        self.expected["recent"] = self.recent
+        self.public[verify.RECENT] = encoded(self.recent)
+        self.public[verify.PAGE] = self.html().replace(b' open>', b'>').replace(
+            b'id="electricity-partial-warning"', b'id="electricity-partial-warning" hidden')
+        verify.verify_once(self.expected, self.public.__getitem__)
 
     def test_loading_and_polling_preserve_local_bytes_and_mtimes(self):
         def snapshot():

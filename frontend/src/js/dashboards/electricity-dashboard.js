@@ -25,8 +25,11 @@
     try {
       const state = data.freshness({ data_through: root.dataset.through,
         snapshot_created_at: root.dataset.created, stale_after_hours: 96 });
-      warning.hidden = !state.stale;
-      warning.textContent = 'Die aktuellen Stundendaten sind älter als 96 Stunden. Es liegen hier noch keine neueren vollständigen Daten vor.';
+      const statusData = snapshot || (document.getElementById('electricity-component-data') ? JSON.parse(document.getElementById('electricity-component-data').textContent) : null);
+      const components = statusData?.components ? data.componentReport({ ...statusData, schema_version: 2 }) : [];
+      const partial = components.some((component) => component.stale || component.status !== 'complete') || Object.values(statusData?.refresh_status || {}).some((meta) => meta.status !== 'ok');
+      warning.hidden = !state.stale && !partial;
+      warning.textContent = partial ? 'Stundendaten teilweise unvollständig oder veraltet. Separate Quellenstände und Abdeckung stehen im Komponentenbericht. Fehlende Werte sind keine Nullen.' : 'Die aktuellen Stundendaten sind älter als 96 Stunden. Es liegen hier noch keine neueren vollständigen Daten vor.';
       return true;
     } catch (error) {
       warning.hidden = false;
@@ -90,7 +93,7 @@
         showSymbol: false, lineStyle: { width: 0 }, areaStyle: { opacity: 0.9 },
         itemStyle: { color: source.color }, emphasis: { focus: 'series' },
         connectNulls: false,
-        data: rows.map((row) => historical ? (history.complete(row) ? row.energy_gwh[source.key] / row.hours : null) : row[source.index]),
+        data: rows.map((row) => historical ? (history.complete(row) ? row.energy_gwh[source.key] / row.hours : null) : (data.SOURCES.every((item) => row[item.index] !== null) ? row[source.index] : null)),
       })) },
       { ...base('GW', text.loadText), series: [{ name: 'Netzlast', type: 'line',
         step: 'middle', showSymbol: false, lineStyle: { width: 2 },
@@ -159,8 +162,8 @@
     renderMix(summary);
     syncSelection();
     const coverage = document.getElementById('electricity-history-coverage');
-    coverage.hidden = !historical;
-    coverage.textContent = historical ? text.coverage : '';
+    coverage.hidden = false;
+    coverage.textContent = text.coverage;
     const provenance = document.getElementById('electricity-history-selection');
     provenance.hidden = !historical;
     if (historical) {
@@ -185,7 +188,7 @@
         });
       }
       options(summary).forEach((option, index) => charts[index].setOption(option, { notMerge: true }));
-      if (announce) status.textContent = `${summary.label} · ${historical ? `${summary.completeDays}/${summary.days} vollständige Tage (tägliche Quellwerte)` : `${data.number(summary.hours, 0)} vollständige Stunden`}. Zeitraum-Ansichten aktualisiert; Langfristvergleich unverändert.`;
+      if (announce) status.textContent = `${summary.label} · ${historical ? `${summary.completeDays}/${summary.days} vollständige Erzeugungstage (tägliche Quellwerte)` : text.coverage}. Zeitraum-Ansichten aktualisiert; Langfristvergleich unverändert.`;
     } catch (error) {
       hideCharts();
       if (announce) status.textContent = `${summary.label}: Diagramme konnten nicht dargestellt werden. Kennzahlen, Quellenmix und Textzusammenfassungen sind verfügbar. Bitte die Seite neu laden, um die Diagramme erneut zu versuchen.`;
@@ -240,6 +243,7 @@
         throw new Error('HTML and JSON snapshots differ');
       }
       snapshot = candidate;
+      checkFreshness();
       if (!embedded) chooseRecent(1);
       buttons.forEach((button) => {
         button.disabled = false;

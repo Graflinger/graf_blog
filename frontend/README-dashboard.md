@@ -10,20 +10,58 @@ Add `dashboardTopic`, `dashboardSummary`, and `dashboardCadence` frontmatter to 
 dashboard pages for their overview cards. The overview itself is not tagged.
 Dashboard chrome uses the site's gold/neutral palette, with a darker gold for
 accessible text on light backgrounds; chart source colours remain distinct.
-Input contracts: [recent hourly v1](../docs/german_electricity_data.md) and
-[daily history v1](../docs/german_electricity_history.md), including its five
-allowlisted nullable energy observations. The pipeline owns
+Input contracts: [recent hourly v1/v2](../docs/german_electricity_data.md),
+[daily history manifest v1 / partitions v1/v2](../docs/german_electricity_history.md)
+and [trade v1/v2](../docs/electricity_trade.md). The authoritative
+[partial-refresh contract](../docs/dashboard_partial_refresh.md) covers exact component
+fields/statuses, nullable metrics, independent cutoffs and source-error recovery.
+The uncommitted feature has no live refresh/deployment acceptance yet; manual code
+promotion to both branches is required and frozen exports are not rewritten.
+The pipeline owns
 `src/_data/germanElectricity.json` and `src/data-history/german-electricity/`.
+
+## Offline partial-refresh release gate
+
+Before promoting partial-refresh code, run these commands from `frontend/` with
+the installed dependencies (Node 20 in CI):
+
+```bash
+npm test -- --runInBand
+npm run lint
+npm run build
+npm run test:v2
+```
+
+`test:v2` copies the frontend and verifier into a disposable temporary workspace,
+reuses installed dependencies, and injects valid, hashed v2 recent/history/trade
+artifacts into that copy. It exercises missing latest-day prices, partial generation
+and load, retained gas/history, a missing trade month, and a closed-year generation
+gap outside the frozen annual supplements. It runs **every frontend test**, lint,
+the production build, and the public verifier against the built files using local
+reads. It makes no network requests. The temporary copy is removed on success or
+failure, and original frontend file fingerprints must remain identical.
+
+Production and template tests share `electricityFilters.js`. Visible report markers
+(`data-component`, `data-refresh`, `data-component-field`) bind reader-facing labels,
+status, coverage and cutoffs to the v2 metadata. The public verifier checks the
+actual text and rejects missing, duplicate, hidden/inert or mismatched report markup;
+partial/retained reports must be expanded and have a visible warning. It does not
+evaluate external CSS. Verifier regression tests run from the repository root:
+
+```bash
+python3 -B -m unittest discover -s scripts/tests -p 'test_verify_dashboard_deployment.py' -v
+```
 
 ## Static rendering and shared controls
 
 Eleventy validates the real snapshot and the entire daily history. The default HTML
 renders **YTD for the latest history year**, from 1 January through its final date,
 with KPIs, source-mix table, chart text summaries, coverage and provenance.
-The existing recent helper and hourly v1 contract retain their 1/7/30-day semantics.
+The recent helper supports v1/v2 with the same 1/7/30-day selections.
 `src/js/dashboards/electricity-data.js` is a dependency-free CommonJS/browser helper
 used by both the build and the interactive page. It validates schema, metadata,
-units, bounded values, complete hourly coverage, calendar days and future timestamps.
+units, bounded values, complete hourly timestamp grids, calendar days and future
+timestamps; v2 also validates nullable observations and per-component metadata.
 At the build boundary, `src/data_ingestion/builders/electricitySnapshot.js` verifies
 the actual SHA-256 against the raw artifact. It preserves Python's numeric tokens
 (including `0.0`, `-0.0` and exponent notation), checks compact sorted-key JSON with
@@ -60,14 +98,20 @@ storage in the denominator. Prices are time-weighted, not load-weighted. Source 
 bars, KPIs and summaries remain available without charts; without JavaScript the
 initial YTD view remains readable and prepared JSON remains downloadable.
 
-The freshness warning uses `data_through`, not snapshot creation time, and updates
+The grid freshness warning uses `data_through`, not snapshot creation time, and updates
 in the browser every minute and when the tab becomes visible. Future timestamps
 are rejected. This is not scheduler monitoring. Public copy describes automatic
 daily updates and points to actual observation dates; capacity/congestion retains
 its separate manual/monthly cadence and statutory targets their manual review date.
+V2 also renders a static component report with status, known/expected hours,
+`source_observed_through` and `last_successful_window_end`. The escaped
+`electricity-component-data` JSON embeds those components and history/trade
+`refresh_status`; build/public checks match it to the recent snapshot. Warnings
+account for partial/stale/unavailable components, history/trade status and component
+observation age. A successful fetch clock is not an observation cutoff.
 
 The [publication workflow](../docs/dashboard_publication.md) authorizes daily
-09:17 UTC recent/history/trade publication using released scripts/runtime/frontend.
+06:00 UTC recent/history/trade publication using released scripts/runtime/frontend.
 Manual dispatch defaults to `publish=false`, refreshing/validating only the selected
 ref. Publishing requires the `main` event ref, followed by explicit
 `releases/cloudflare` checkout. Before source fetching, the guard requires
@@ -110,24 +154,29 @@ referenced partitions**, including years that are not selected on the page. It c
 
 - Exact keys, schema, source/license, revision policy, years and same-origin URLs.
 - Contiguous dates/counts, leap days, Berlin 23/24/25-hour days, finite bounded values.
-- Only the documented price and energy nulls, historical price zones, numeric
-  nuclear values, shutdown zeros and their explicit derived-zero flags.
+- Version-specific null rules: narrow documented v1 gaps or nullable v2 observations;
+  historical price zones, nuclear shutdown zeros and explicit derived-zero flags.
 - Compact sorted-key UTF-8 JSON with no trailing newline or duplicate keys. Numeric
   tokens retain their Python spelling; SHA-256 hashes **raw bytes**, using Node
   crypto at build time and WebCrypto in the browser.
 
 At the build boundary, the helper also reads the exact recent producer file through
-`electricitySnapshot.verifySnapshot`. Recent and history must end on the same Berlin
-calendar date (recent's `data_through` is exclusive). Every date shared by their
+`electricitySnapshot.verifySnapshot`. Recent v1/history must end on the same Berlin
+calendar date (recent's `data_through` is exclusive); recent v2 permits independent
+cutoffs. Embedded history status must match manifest `last_date`, and trade status
+must match trade `last_month`. Every date shared by their
 declared ranges must exist with the same actual day hours. Daily energy is compared
 to the hourly GW sum with tolerance `(hours + 1) * 0.005 / 1000 + 1e-8` GWh;
 daily price is compared to the hourly mean with tolerance `0.011` EUR/MWh, matching
-the pipeline. Missing observations never become zero. Nuclear has no recent v1
+the pipeline. In v2 a series/day comparison requires a numeric daily value and all
+expected numeric hourly values; otherwise it is skipped, not treated as equality.
+Missing observations never become zero. Nuclear has no recent
 series and is covered by the separate history shutdown/schema checks.
 January overlap includes the preceding year's partition; a subset history starting
 on 1 January compares only shared dates. Older dates outside the recent window
 retain their documented source limitations. A mismatch fails the build even if
-each artifact has a valid hash: refresh recent first, then history against it.
+each artifact has a valid hash: use coordinated `.refresh` and investigate available
+contradictions. V2 allows no overlap when independently retained ranges have diverged.
 The after-build check repeats overlap validation and checks that the public recent
 JSON matches the validated producer snapshot. Tests can supply an alternate raw
 recent snapshot to `readHistory(directory, recentRaw)`; it is always fully verified.
@@ -158,9 +207,10 @@ are pending; `aria-busy` and a live status announce loading and failure.
 
 ### Aggregation and interpretation
 
-- **Energy:** exclude a date from *all* generation, renewable share, mix and load
-  summary calculations when any required energy field is null. Use the same
-  complete-day hours denominator for all averages. Actual source gaps yield
+- **Generation:** exclude a date from generation, renewable share and mix summary
+  calculations when any required generation field is null. Use the same complete-
+  generation-day hours denominator for those averages. Load is independent and
+  uses its own known days/hours; a load gap does not erase generation. Actual source gaps yield
   **365/366 complete days in 2016** and **361/365 in 2018**; these are explicitly
   partial sums, not annual totals. Never coerce missing values to zero.
 - **Charts:** daily generation/load power is GWh / actual day hours, in GW. All
@@ -170,6 +220,7 @@ are pending; `aria-busy` and a live status announce loading and failure.
 - **Prices:** sum daily mean × actual hours, divided by known-price hours, independent
   of energy coverage. In 2015, 1–4 January remain unknown: 361/365 priced days and
   96 excluded hours. Count negative **daily mean days**, never negative hours.
+  All-missing mean and negative-day count remain null.
 - **Market areas:** DE–AT–LU through 30 September 2018, DE–LU from 1 October. The 2018
   blended annual price is labeled with both market areas; comparisons need care.
 - **Nuclear:** a twelfth history-only generation/table/legend source, excluded from
@@ -186,6 +237,17 @@ with the same 96-hour delay after the next Berlin midnight. The separate recent
 warning continues to describe current hourly data. Both advance in open tabs.
 The year selector is sufficient for historical exploration; there is no all-years
 chart that would require downloading the entire history.
+
+### Recent and trade partial metrics
+
+Recent total generation, average and shares are suppressed when any generation
+input in the selected period is missing. Per-source known sums/means carry coverage;
+all stacked sources have a gap at an incomplete generation hour. Load and price use
+their own known durations; all-missing metrics, including negative-hour counts and
+extrema, stay null. Trade missing inputs require three null monthly totals; a missing
+included month suppresses annual/YTD trade sums. Long-term annual generation keeps
+its full-year suppression rule and separate frozen 2016/2018 supplements. See
+[exact null-safe formulas and coverage](../docs/dashboard_partial_refresh.md#null-safe-frontend-metrics).
 
 ## Verification
 
@@ -210,8 +272,12 @@ period consistency, and chart-generation failure propagation.
 contract mutations, missing/corrupt unselected partitions, daily aggregation, lazy
 caching, 404/mixed manifests and timeout recovery. `tests/electricity-history-dashboard.test.js`
 adds static YTD, every year, daily chart gaps/units, dynamic nuclear, independent
-freshness and asynchronous controller regression coverage. Existing recent tests
-remain unchanged.
+freshness and asynchronous controller regression coverage.
+`tests/electricity-partial.test.js` adds September 13 price-null fixtures, independent
+generation/load/price coverage, all-null DST metrics, v2 metadata mutations, nullable
+trade totals and independent-cutoff overlap checks. Pipeline cross-language fixtures
+validate Python-produced v2 bundles with these frontend helpers. Test coverage is
+not a live source-recovery or deployment acceptance claim.
 
 `src/scss/pages/_electricity.scss` holds scoped theme tokens and dashboard styles;
 Sass emits the existing tracked `src/css/style.css` (include intentional dashboard styles). Generated legacy chart rewrites

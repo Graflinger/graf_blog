@@ -17,7 +17,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 PUBLISH = "env.PUBLISH == 'true'"
 CHANGED = "steps.prepare.outputs.changed == 'true'"
-ELECTRICITY = "python -m src.data_pipelines.dashboards.german_electricity"
+ELECTRICITY = "python -m src.data_pipelines.dashboards.german_electricity.refresh"
 SCRIPT_TESTS = "python -B -m unittest discover -s scripts/tests -p 'test_*.py' -v"
 FRONTEND_CHECKS = ["npm ci", "npm test -- --runInBand", "npm run lint", "npm run build"]
 
@@ -139,7 +139,7 @@ class DashboardWorkflowTests(unittest.TestCase):
         refresh_steps = [s for s in self.production_steps
                          if field(s, "run", "").startswith(ELECTRICITY)]
         self.assertEqual([field(s, "run") for s in refresh_steps], [
-            ELECTRICITY, ELECTRICITY + ".history refresh", ELECTRICITY + ".trade refresh",
+            ELECTRICITY,
         ])
         for step in refresh_steps:
             self.assert_success_only(step)

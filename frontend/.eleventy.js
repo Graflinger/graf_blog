@@ -5,6 +5,7 @@ const { validateBuildSnapshot } = require('./src/data_ingestion/builders/electri
 const { verifyPublished } = require('./src/data_ingestion/builders/electricityHistory');
 const { verifyPublishedTrends } = require('./src/data_ingestion/builders/electricityTrends');
 const { verifyPublishedProgress } = require('./src/data_ingestion/builders/electricityProgress');
+const electricityFilters = require('./src/data_ingestion/builders/electricityFilters');
 
 module.exports = function (eleventyConfig) {
   // Generate charts before Eleventy build
@@ -17,12 +18,10 @@ module.exports = function (eleventyConfig) {
 
   eleventyConfig.addFilter('electricitySummary', (snapshot) => {
     validateBuildSnapshot(snapshot);
-    const summary = electricity.summarize(snapshot);
-    return { ...summary, text: electricity.presentation(summary),
-      createdLabel: electricity.timestampLabel(Date.parse(snapshot.snapshot_created_at)),
-      stale: electricity.freshness(snapshot).stale };
+    return electricityFilters.summary(snapshot);
   });
   eleventyConfig.addFilter('electricityNumber', electricity.number);
+  eleventyConfig.addFilter('electricityStatusJSON', electricityFilters.statusJSON);
   eleventyConfig.addFilter('electricityJSON', (snapshot) => {
     validateBuildSnapshot(snapshot);
     return JSON.stringify(snapshot).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');

@@ -19,7 +19,8 @@ function verifyPartition(raw, entry) {
 // Both inputs have already passed their full schema/raw-hash validators.
 function compareOverlap(manifest, partitions, recent) {
   const lastDate = electricity.dayKey(Date.parse(recent.data_through) - 1);
-  if (manifest.last_date !== lastDate) throw new Error(`History/recent cutoff mismatch: ${manifest.last_date} / ${lastDate}; refresh recent then history together`);
+  if (recent.schema_version === 1 && manifest.last_date !== lastDate) throw new Error(`History/recent cutoff mismatch: ${manifest.last_date} / ${lastDate}; refresh recent then history together`);
+  if (recent.refresh_status?.history && recent.refresh_status.history.data_through !== manifest.last_date) throw new Error('History/status cutoff mismatch');
   const daily = new Map(partitions.flatMap((partition) => partition.rows.map((row) => [row.date, row])));
   const hourly = new Map();
   for (const row of recent.rows) {
@@ -31,7 +32,7 @@ function compareOverlap(manifest, partitions, recent) {
   for (const [date, points] of hourly) {
     // A valid subset history can start later than the recent window (e.g. January).
     // Within the declared history range, every overlapping day is mandatory.
-    if (date < manifest.first_date) continue;
+    if (date < manifest.first_date || date > manifest.last_date) continue;
     const row = daily.get(date);
     if (!row || row.hours !== points.length) throw new Error(`History/recent missing day or hour mismatch: ${date}`);
     days++;
@@ -40,6 +41,7 @@ function compareOverlap(manifest, partitions, recent) {
       const sum = points.reduce((total, point) => total + point[index], 0);
       const price = column === 'price';
       const observed = price ? row.price_eur_mwh : row.energy_gwh[column];
+      if (recent.schema_version === 2 && (observed === null || points.some((point) => point[index] === null))) continue;
       const expected = price ? sum / points.length : sum;
       const tolerance = price ? 0.011 : (points.length + 1) * 0.005 / 1000 + 1e-8;
       // Never let null become zero through subtraction. Recent v1 is complete
@@ -50,7 +52,7 @@ function compareOverlap(manifest, partitions, recent) {
       }
     }
   }
-  if (!days) throw new Error('History/recent have no overlapping days');
+  if (!days && recent.schema_version === 1) throw new Error('History/recent have no overlapping days');
   return { days, last_date: lastDate };
 }
 function readHistory(directory = DIRECTORY, recentRaw = readBounded(RECENT_PATH, 1000000).toString('utf8')) {
@@ -88,6 +90,7 @@ function verifyPublished(outputDirectory) {
     if (!fs.readFileSync(path.join(DIRECTORY, name)).equals(fs.readFileSync(path.join(published, name)))) throw new Error(`Published history bytes differ: ${name}`);
   }
   const html = fs.readFileSync(path.join(outputDirectory, 'dashboards/strom/index.html'), 'utf8');
+  if (recent.schema_version === 2 && !html.includes(`<script type="application/json" id="electricity-component-data">${history.safeJSON({ components: recent.components, refresh_status: recent.refresh_status })}</script>`)) throw new Error('Published HTML/component status mismatch');
   if (!html.includes(`<script type="application/json" id="electricity-history-manifest">${manifestJSON}</script>`)) throw new Error('Published HTML/history manifest mismatch');
 }
 module.exports = { readHistory, verifyPartition, verifyPublished };

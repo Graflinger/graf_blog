@@ -59,21 +59,11 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_german_electricity*.py' -v
       - name: Test publication and synchronization safeguards
         run: python -B -m unittest discover -s scripts/tests -p 'test_*.py' -v
-      - name: Refresh and validate real SMARD data
+      - name: Refresh isolated components and validate the complete bundle
         working-directory: pipeline
         env:
           PYTHONPATH: .
-        run: python -m src.data_pipelines.dashboards.german_electricity
-      - name: Update current-year history and validate overlap
-        working-directory: pipeline
-        env:
-          PYTHONPATH: .
-        run: python -m src.data_pipelines.dashboards.german_electricity.history refresh
-      - name: Update monthly DE-LU commercial trade
-        working-directory: pipeline
-        env:
-          PYTHONPATH: .
-        run: python -m src.data_pipelines.dashboards.german_electricity.trade refresh
+        run: python -m src.data_pipelines.dashboards.german_electricity.refresh
       - uses: actions/setup-node@v4
         with:
           node-version: '20'

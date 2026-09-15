@@ -41,7 +41,19 @@ SCRIPTS = {
 }
 INLINE_IDS = {
     "electricity-history-manifest", "electricity-trends-data", "electricity-progress-data",
+    "electricity-component-data",
 }
+COMPONENT_LABELS = {
+    "biomass": "Biomasse", "hydro": "Wasserkraft", "wind_offshore": "Wind auf See",
+    "wind_onshore": "Wind an Land", "solar": "Solar", "other_renewables": "Sonstige Erneuerbare",
+    "lignite": "Braunkohle", "hard_coal": "Steinkohle", "gas": "Erdgas",
+    "other_conventional": "Sonstige Konventionelle", "pumped_storage": "Pumpspeicher",
+    "load": "Netzlast", "price": "Day-Ahead-Preis",
+}
+COMPONENT_STATUS = {"complete": "vollständig", "partial": "teilweise",
+                    "stale": "beibehalten / veraltet", "unavailable": "nicht verfügbar"}
+REFRESH_STATUS = {"ok": "erfolgreich aktualisiert", "partial": "aktualisiert mit Quellenlücken",
+                  "stale": "beibehalten nach fehlgeschlagener Aktualisierung"}
 
 
 class VerificationError(RuntimeError):
@@ -258,6 +270,97 @@ def compare(actual, expected, label):
     require(same_json(actual, expected), f"{label} mismatch")
 
 
+class VisibleReport(HTMLParser):
+    """Inspect reader-facing report text, not data attributes or hidden JSON.
+
+    Reject hidden/inert ancestors and inline hiding. Closed details are allowed for
+    a healthy report; a partial/retained report must be expanded in the static HTML.
+    This checks markup, not computed CSS or general browser rendering.
+    """
+    VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+            "meta", "param", "source", "track", "wbr"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.nodes = []
+        self.stack = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        style = re.sub(r"\s+", "", attrs.get("style", "").lower())
+        hidden = (tag in {"script", "style", "template", "noscript"}
+                  or "hidden" in attrs or "inert" in attrs
+                  or attrs.get("aria-hidden", "").lower() == "true"
+                  or any(token in style for token in ("display:none", "visibility:hidden"))
+                  or re.search(r"(?:^|;)opacity:0(?:\.0+)?(?:!important)?(?:;|$)", style) is not None
+                  or any(node["hidden"] for node in self.stack))
+        node = {"tag": tag, "attrs": attrs, "hidden": hidden,
+                "ancestors": self.stack[:], "text": ""}
+        self.nodes.append(node)
+        if tag not in self.VOID:
+            self.stack.append(node)
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index]["tag"] == tag:
+                del self.stack[index:]
+                break
+
+    def handle_data(self, text):
+        if not any(node["hidden"] for node in self.stack):
+            for node in self.stack:
+                node["text"] += text
+
+    def select(self, attribute, value=None, parent=None):
+        return [node for node in self.nodes if attribute in node["attrs"]
+                and (value is None or node["attrs"][attribute] == value)
+                and (parent is None or any(ancestor is parent for ancestor in node["ancestors"]))]
+
+    def one(self, attribute, value, parent=None):
+        nodes = self.select(attribute, value, parent)
+        require(len(nodes) == 1 and not nodes[0]["hidden"], f"Missing, hidden or duplicate visible report: {value}")
+        return nodes[0]
+
+    def fields(self, row, expected):
+        nodes = self.select("data-component-field", parent=row)
+        require(len(nodes) == len(expected), "Visible report field count mismatch")
+        for key, text in expected.items():
+            node = self.one("data-component-field", key, row)
+            require(node["tag"] in {"td", "th", "span"}, "Invalid visible report field markup")
+            compare(" ".join(node["text"].split()), text, f"Visible report {key}")
+
+
+def verify_visible_report(html, recent):
+    page = VisibleReport()
+    page.feed(html)
+    page.close()
+    article = page.one("id", "electricity-dashboard")
+    report = page.one("id", "electricity-component-report", article)
+    require(report["tag"] == "details", "Invalid component report markup")
+    components = recent["components"]
+    refresh = recent["refresh_status"]
+    partial = any(meta["status"] != "complete" for meta in components.values()) or any(meta["status"] != "ok" for meta in refresh.values())
+    if partial:
+        require("open" in report["attrs"], "Partial component report must be expanded")
+        warning = page.one("id", "electricity-partial-warning", article)
+        require("Teilaktualisierung" in warning["text"] and "Fehlende Werte sind keine Nullen" in warning["text"],
+                "Missing visible partial/retained warning")
+    require(len(page.select("data-component", parent=report)) == len(components), "Visible component row count mismatch")
+    for key, meta in components.items():
+        row = page.one("data-component", key, report)
+        require(row["tag"] == "tr", "Component must be a visible table row")
+        page.fields(row, {"label": COMPONENT_LABELS[key], "status": COMPONENT_STATUS[meta["status"]],
+                         "coverage": f"{meta['known_hours']}/{meta['expected_hours']}",
+                         "observed": meta["source_observed_through"] or "–",
+                         "success": meta["last_successful_window_end"] or "–"})
+    require(len(page.select("data-refresh", parent=report)) == len(refresh), "Visible refresh row count mismatch")
+    for key, meta in refresh.items():
+        row = page.one("data-refresh", key, report)
+        require(row["tag"] == "p", "Refresh must be a visible report paragraph")
+        page.fields(row, {"label": "Tageshistorie" if key == "history" else "Monatlicher Handel",
+                         "status": REFRESH_STATUS[meta["status"]], "through": meta["data_through"]})
+
+
 def verify_once(expected, get):
     recent = strict_json(get(RECENT))
     for field in ("content_hash", "data_through"):
@@ -277,8 +380,14 @@ def verify_once(expected, get):
     compare(progress.get("content_hash"), expected["progress"]["content_hash"], "Progress content_hash")
     compare(progress, expected["progress"], PROGRESS)
     page = DashboardHTML()
-    page.feed(get(PAGE).decode("utf-8"))
+    html = get(PAGE).decode("utf-8")
+    page.feed(html)
     page.close()
+    if recent.get("schema_version") == 2:
+        require("electricity-component-data" in page.inline, "Missing public component status")
+        compare(strict_json(page.inline["electricity-component-data"]),
+                {key: recent[key] for key in ("components", "refresh_status")}, "HTML component coverage/status")
+        verify_visible_report(html, recent)
     require(len(page.articles) == 1, "Missing or duplicate dashboard article")
     for marker, field in (("data-hash", "content_hash"), ("data-through", "data_through")):
         compare(page.articles[0].get(marker), expected["recent"][field], f"HTML {marker}")

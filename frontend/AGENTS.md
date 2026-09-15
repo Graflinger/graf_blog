@@ -30,7 +30,7 @@ node "src/data_ingestion/generate-charts.js" industriepolitik.js
 
 Read [dashboard_architecture.md](../docs/dashboard_architecture.md) before adding dashboard
 pages, chart data, freshness metadata, or refresh/deployment automation. It specifies
-the planned daily, stateless pipeline using the existing stack. Keep live dashboard
+the default daily, stateless pipeline and approved durable-export exceptions using the existing stack. Keep live dashboard
 datasets separate from frozen blog-post snapshots, and render prepared exports rather
 than fetching raw upstream data in visitors' browsers.
 
@@ -40,10 +40,17 @@ for the first dashboard. Read [dashboard_publication.md](../docs/dashboard_publi
 for the implemented daily workflow, released-base guard, and rollout status.
 
 The electricity dashboard now has approved [persistent daily history](../docs/german_electricity_history.md).
+Read [partial refresh](../docs/dashboard_partial_refresh.md) for the approved durable
+recent per-component exception, v1/v2 compatibility, nullable metrics and explicit
+coverage/statuses, independent daily cutoffs and available overlap checks. Use
+coordinated `.refresh`; source failures retain last-good data, shared errors abort
+the bundle. Keep DuckDB temporary. Implementation/PR authorization does not authorize
+production rollout; feature live acceptance and manual code promotion to both
+branches remain pending. Do not rewrite frozen exports to migrate the code.
 Preserve raw hashed partition bytes, source gaps, nuclear-era and price-zone metadata.
 Load historical years lazily; never interpret missing observations as zero or daily
 price averages as negative-hour counts. Daily data-only publication is authorized at
-09:17 UTC. Deliberately promote the release-first implementation to **both `main`
+06:00 UTC. Deliberately promote the release-first implementation to **both `main`
 and `releases/cloudflare`** before the schedule uses released scripts; new live
 verification is pending. The September 10 success used the old both-ref design.
 Manual `publish=false` defaults to refreshing/validating only the selected ref.

@@ -54,7 +54,7 @@ test.each([
   ['whitespace', (input) => input.replace('{', '{ ')],
   ['missing newline', (input) => input.trimEnd()],
   ['extra newline', (input) => `${input}\n`],
-  ['key order', (input) => input.replace('"schema_version":1,', '').replace('{', '{"schema_version":1,')],
+  ['key order', (input) => input.replace(`"schema_version":${snapshot.schema_version},`, '').replace('{', `{"schema_version":${snapshot.schema_version},`)],
   ['trailing garbage', (input) => `${input}oops`],
 ])('rejects noncanonical or ambiguous artifact: %s', (name, change) => {
   expect(() => verifySnapshot(change(raw), now)).toThrow();

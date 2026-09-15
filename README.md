@@ -7,8 +7,9 @@ Public and open-sourced for reproducibility/transparency of the data analysis. A
 
 ## Documentation
 
-- [Dashboard architecture](docs/dashboard_architecture.md): the daily dashboard design and approved history extension.
+- [Dashboard architecture](docs/dashboard_architecture.md): the daily dashboard design and approved durable-export exceptions.
 - [Dashboard publication](docs/dashboard_publication.md): authorized daily data-only publication, branch guards, rollout status, and recovery.
+- [Dashboard partial refresh](docs/dashboard_partial_refresh.md): v2 nulls/coverage, durable per-component last-good retention, coordinated CLI, failure recovery and pending manual rollout.
 - [Plan B](docs/plan_b.md): alternatives for persistent history, independent publishing, and servers.
 - [German electricity dashboard](docs/german_electricity_data.md): SMARD licensing, methodology, refresh commands, and validation.
 - [Electricity history](docs/german_electricity_history.md): yearly data from 2015, YTD, rolling corrections, and reconciliation.
@@ -66,7 +67,7 @@ and validate again rather than overwrite newer snapshots. Daily data commits lan
 directly on release through the guarded publisher; `main` and release need not
 routinely be equal. The publisher does not release main's code/blog changes.
 
-**Daily data publication:** `dashboard-refresh.yml` schedules 09:17 UTC daily;
+**Daily data publication:** `dashboard-refresh.yml` schedules 06:00 UTC daily;
 manual dispatch has `publish=false` by default and refreshes/validates only the
 selected ref. Publishing requires the `main` **event ref**, then explicitly checks
 out `releases/cloudflare` for scripts, runtime, and frontend. The pre-fetch guard
@@ -74,6 +75,13 @@ requires `HEAD == origin/releases/cloudflare` and ignores main. Only validated
 recent data, current-year history, and monthly trade may be committed and pushed
 **to release only, without force**. Monthly/manual capacity and congestion and
 frozen annual supplements are outside the daily refresh and write allowlist.
+
+The uncommitted [partial-refresh feature](docs/dashboard_partial_refresh.md) stages
+recent/history/trade through `.refresh`, retaining validated last-good components
+on source errors with explicit status and coverage. This is an approved durable
+recent-export exception, with no persistent database. Implementation/PR authorization
+does not authorize production rollout; feature live acceptance and manual code
+promotion to both branches remain pending. Frozen exports are not rewritten.
 
 Publishing runs verify public snapshots/HTML for up to 240 seconds, including
 no-change runs. Only the verified release SHA permits a separate `sync-main` job:

@@ -26,6 +26,8 @@ jobs:
       - run: npm test -- --runInBand
       - run: npm run lint
       - run: npm run build
+      - name: Exercise full nullable v2 frontend and built-output verification offline
+        run: npm run test:v2
   pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 10

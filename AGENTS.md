@@ -15,20 +15,16 @@ publication, read:
 
 - [Dashboard architecture](docs/dashboard_architecture.md): the default design and
   acceptance checklist for one daily, stateless dashboard using the existing stack.
+- [Dashboard partial refresh](docs/dashboard_partial_refresh.md): approved durable
+  recent per-component retention, v2 null/status contracts, coordinated `.refresh`,
+  independent history cutoff, hard shared failures and recovery. Feature live
+  acceptance/manual promotion to both branches remain pending; implementation/PR
+  authorization does not authorize production rollout or frozen-export rewrites.
 - [Plan B](docs/plan_b.md): optional paths for independent publishing, durable history,
   managed databases, scheduled compute, or a server. Do not introduce these without
   an explicit need and agreement on the trade-offs.
-
-Dashboard runs must reconstruct their required data from scratch, remain idempotent,
-and select only necessary sources/models. Do not persist the DuckDB database between
-runs. Keep dependencies, source requests, and runtime bounded; publish only validated,
-compact exports. Preserve frozen blog-post datasets and the last working dashboard
-on failure. The architecture documents describe planned work, not existing automation.
 - [Dashboard publication](docs/dashboard_publication.md): authorized daily data-only
   publication, released-base guards, public verification, and recovery.
-- [Plan B](docs/plan_b.md): optional paths for independent publishing, durable history,
-  managed databases, scheduled compute, or a server. Do not introduce these without
-  an explicit need and agreement on the trade-offs.
 - [German electricity history](docs/german_electricity_history.md): approved exception
   storing validated daily history in yearly Git-tracked partitions. Refresh only the
   current year's correction window; closed years require explicit reconciliation.
@@ -43,15 +39,18 @@ on failure. The architecture documents describe planned work, not existing autom
   separate; no target-attainment ratios. Do not add this monthly/manual source to
   the daily refresh or treat congestion measures as outages or renewable losses.
 
-Dashboard runs are stateless by default; the approved electricity history uses validated
-repository snapshots as durable state. All runs must remain idempotent and select only
-necessary sources/models. Do not persist the DuckDB database between
-runs. Keep dependencies, source requests, and runtime bounded; publish only validated,
-compact exports. Preserve frozen blog-post datasets and the last working dashboard
-on failure. Refresh recent electricity data before history and validate their overlap,
-then refresh monthly trade. Build long-term generation trends from existing history
+Dashboard runs are stateless by default; approved electricity recent per-component
+retention, history and trade use validated repository snapshots as durable state.
+All runs must remain idempotent and select only necessary sources/models. Do not
+persist the DuckDB database between runs. Keep dependencies, source requests, and
+runtime bounded; publish only validated, compact exports. Preserve frozen blog-post
+datasets and the last working dashboard
+on shared failure. Use coordinated `.refresh`: stage recent, independent daily history
+with available overlapping observations checked, then monthly trade. Isolate source
+failures with explicit statuses; shared corruption/dbt/storage/consistency errors
+abort the bundle. Build long-term generation trends from existing history
 without additional source requests.
-Daily production data publication is authorized in `dashboard-refresh.yml` at 09:17
+Daily production data publication is authorized in `dashboard-refresh.yml` at 06:00
 UTC. The release-first implementation must be deliberately promoted to **both `main`
 and `releases/cloudflare`** before the schedule relies on released scripts; new live
 rollout verification is pending (the September 10 success used the old both-ref design).
